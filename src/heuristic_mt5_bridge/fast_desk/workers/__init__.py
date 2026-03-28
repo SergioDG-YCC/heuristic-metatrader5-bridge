@@ -1,0 +1,2 @@
+"""Fast desk worker models."""
+

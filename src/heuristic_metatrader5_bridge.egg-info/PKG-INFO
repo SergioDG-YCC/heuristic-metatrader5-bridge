@@ -1,0 +1,130 @@
+Metadata-Version: 2.4
+Name: heuristic-metatrader5-bridge
+Version: 0.1.0
+Summary: Heuristic-first MT5 bridge with separate fast desk and SMC desk.
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: pydantic<3,>=2.8
+Requires-Dist: pydantic-settings<3,>=2.4
+Requires-Dist: fastapi<1,>=0.115
+Requires-Dist: uvicorn<1,>=0.30
+Requires-Dist: httpx<1,>=0.27
+Requires-Dist: orjson<4,>=3.10
+
+# heuristic-metatrader5-bridge
+
+New repository for a split architecture:
+
+- `Fast Desk`: heuristic-first, low-latency, no LLM in the critical path
+- `SMC Desk`: heuristic-first, slower, optional multimodal LLM validation
+- `Shared Core`: MT5 ingestion, market state in RAM, account state, broker sessions, indicator enrichment, execution bridge
+
+This repo exists because the original `llm-metatrader5-bridge` grew into a hybrid office-style system with too much cumulative LLM latency for scalping and active position custody.
+
+## Core decision
+
+The fast desk must not wait for multi-role LLM coordination.
+
+Priority order:
+
+1. protect account
+2. protect open profit
+3. cut losses fast
+4. execute deterministically
+5. explain later
+
+## Memory policy
+
+This repository does not assume a `memory_curator` for the fast desk.
+
+Instead:
+
+- the `Fast Desk` should rely on a translated **heuristic library**
+- the `SMC Desk` may keep slower analytical state where justified
+- persistent storage should exist only for operationally necessary state
+
+Default rule:
+
+- do not store data because it "might be useful"
+- store only what is required for execution, recovery, audit, or SMC continuity
+
+## High-level architecture
+
+### Shared Core
+
+- MT5 connector
+- market state runtime
+- account runtime
+- broker session runtime
+- indicator enrichment
+- symbol specs
+- runtime DB helpers
+- execution bridge
+
+### Fast Desk
+
+- signal engine
+- risk engine
+- execution custodian
+- event-driven workers by symbol and by position
+- pure Python heuristics in the hot path
+- no memory curator role
+- no narrative memory accumulation in the execution path
+
+### SMC Desk
+
+- SMC scanner
+- heuristic analyst
+- heuristic validators
+- optional multimodal LLM validator / final analyst
+- slower queue, separate from fast desk
+
+## What this repo is not
+
+- It is not a copy of the current LLM office stack.
+- It is not a continuation of `chairman -> analyst -> supervisor -> trader -> risk` for scalping.
+- It is not an attempt to patch the old architecture forever.
+
+## Initial deliverables
+
+1. architecture docs
+2. extraction plan from the old repo
+3. constructor prompt for the fast desk
+4. constructor prompt for the SMC desk
+5. then code migration in phases
+
+## Planned structure
+
+```text
+docs/
+  ARCHITECTURE.md
+  plans/
+  prompts/
+
+python/
+  core/
+  fast_desk/
+  smc_desk/
+  shared/
+```
+
+## Current state
+
+At bootstrap time, this repo starts as docs-only on purpose.
+
+The first coding phase should happen only after:
+
+- the shared core boundary is fixed
+- the fast desk contract is fixed
+- the SMC multimodal contract is fixed
+
+## Next step
+
+Use:
+
+- `docs/ARCHITECTURE.md`
+- `docs/plans/2026-03-23_extraction_plan.md`
+- `docs/prompts/FAST_DESK_CONSTRUCTOR.md`
+- `docs/prompts/SMC_DESK_MULTIMODAL_CONSTRUCTOR.md`
+
+as the initial canonical set before moving code.

@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MT5 Bridge — Launch & Runtime Overview</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+
+  :root {
+    --bg-base: #0e1014;
+    --bg-panel: #151920;
+    --bg-elevated: #1e2530;
+    --border-subtle: #252c38;
+    --border-medium: #2f3847;
+    --text-primary: #e2e6ed;
+    --text-secondary: #8c95a6;
+    --text-muted: #5a6475;
+    --fast-teal: #2dd4a8;
+    --fast-teal-dim: rgba(45,212,168,0.12);
+    --smc-blue: #5b8def;
+    --smc-blue-dim: rgba(91,141,239,0.12);
+    --risk-amber: #f5a623;
+    --risk-amber-dim: rgba(245,166,35,0.10);
+    --risk-red: #ef4444;
+    --risk-red-dim: rgba(239,68,68,0.10);
+    --pnl-green: #22c55e;
+    --pnl-green-dim: rgba(34,197,94,0.10);
+    --planned-slate: #3d4555;
+    --planned-bg: rgba(61,69,85,0.18);
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: var(--bg-base);
+    color: var(--text-primary);
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 11px;
+    line-height: 1.4;
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* --- Nav Rail --- */
+  .nav-rail {
+    width: 52px;
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 12px 0;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .nav-logo {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--fast-teal);
+    margin-bottom: 12px;
+    letter-spacing: -0.02em;
+  }
+  .nav-item {
+    width: 36px; height: 36px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 4px;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 14px;
+    position: relative;
+    transition: all 0.15s;
+  }
+  .nav-item:hover { background: var(--bg-elevated); color: var(--text-secondary); }
+  .nav-item.active {
+    background: var(--fast-teal-dim);
+    color: var(--fast-teal);
+  }
+  .nav-item.active::before {
+    content: '';
+    position: absolute;
+    left: -8px;
+    width: 3px;
+    height: 18px;
+    background: var(--fast-teal);
+    border-radius: 0 2px 2px 0;
+  }
+  .nav-spacer { flex: 1; }
+  .nav-item .badge {
+    position: absolute;
+    top: 4px; right: 4px;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--risk-red);
+  }
+
+  /* --- Main Area --- */
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* --- Top Status Strip --- */
+  .status-strip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border-subtle);
+    flex-wrap: wrap;
+  }
+  .ss-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9.5px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+  }
+  .ss-dot {
+    width: 5px; height: 5px;
+    border-radius: 50%;
+  }
+  .ss-dot.up { background: var(--pnl-green); box-shadow: 0 0 4px var(--pnl-green); }
+  .ss-dot.degraded { background: var(--risk-amber); box-shadow: 0 0 3px var(--risk-amber); }
+  .ss-dot.down { background: var(--risk-red); box-shadow: 0 0 3px var(--risk-red); }
+  .ss-label { color: var(--text-muted); }
+  .ss-value { color: var(--text-secondary); font-weight: 500; }
+  .ss-sep { width: 1px; height: 14px; background: var(--border-subtle); margin: 0 4px; }
+  .ss-time {
+    margin-left: auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text-muted);
+  }
+
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .live-pulse { animation: pulse 2s ease-in-out infinite; }
+
+  /* --- Content Grid --- */
+  .content {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr 320px;
+    grid-template-rows: auto 1fr auto;
+    gap: 8px;
+    padding: 10px 12px;
+    overflow-y: auto;
+  }
+
+  .panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .panel-head {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .panel-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .panel-title .accent-dot {
+    width: 5px; height: 5px;
+    border-radius: 50%;
+  }
+  .panel-body { padding: 10px 12px; }
+  .panel-body-flush { padding: 0; }
+
+  /* --- Broker Identity --- */
+  .broker-block { grid-column: 1 / 3; }
+  .broker-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+  }
+  .broker-field label {
+    display: block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8.5px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 3px;
+  }
+  .broker-field .val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+  .broker-field .val.accent-teal { color: var(--fast-teal); }
+
+  /* --- Account Snapshot --- */
+  .account-snap { grid-column: 3 / 4; grid-row: 1 / 2; }
+  .snap-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .snap-item label {
+    display: block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 2px;
+  }
+  .snap-item .val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .snap-item .val.green { color: var(--pnl-green); }
+
+  /* --- Worker Matrix --- */
+  .worker-matrix { grid-column: 1 / 2; }
+  .worker-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 4px;
+  }
+  .worker-card {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    border-radius: 3px;
+    padding: 6px 8px;
+    text-align: center;
+  }
+  .worker-card .sym {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 3px;
+  }
+  .worker-card .state {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .worker-card .state.fresh { color: var(--pnl-green); }
+  .worker-card .state.stale { color: var(--risk-amber); }
+  .worker-card .state.error { color: var(--risk-red); }
+  .worker-card .age {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 7.5px;
+    color: var(--text-muted);
+    margin-top: 2px;
+  }
+
+  /* --- Symbol Universe --- */
+  .symbol-universe { grid-column: 2 / 3; }
+  .su-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9.5px;
+  }
+  .su-table th {
+    text-align: left;
+    color: var(--text-muted);
+    font-weight: 500;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border-subtle);
+    font-size: 8.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .su-table td {
+    padding: 4px 8px;
+    color: var(--text-secondary);
+    border-bottom: 1px solid rgba(37,44,56,0.4);
+  }
+  .su-table td:first-child { color: var(--text-primary); font-weight: 500; }
+  .su-sub-chip {
+    display: inline-block;
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-size: 8px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .su-sub-chip.fast { background: var(--fast-teal-dim); color: var(--fast-teal); }
+  .su-sub-chip.smc { background: var(--smc-blue-dim); color: var(--smc-blue); }
+  .su-sub-chip.both { background: rgba(168,85,247,0.12); color: #a78bfa; }
+
+  /* --- Event Timeline --- */
+  .event-timeline { grid-column: 3 / 4; grid-row: 2 / 4; }
+  .timeline-entries {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .tl-entry {
+    display: flex;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(37,44,56,0.35);
+    align-items: flex-start;
+  }
+  .tl-time {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8.5px;
+    color: var(--text-muted);
+    min-width: 52px;
+    flex-shrink: 0;
+    padding-top: 1px;
+  }
+  .tl-dot-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-top: 3px;
+  }
+  .tl-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .tl-dot.info { background: var(--smc-blue); }
+  .tl-dot.success { background: var(--pnl-green); }
+  .tl-dot.warn { background: var(--risk-amber); }
+  .tl-dot.error { background: var(--risk-red); }
+  .tl-content {
+    flex: 1;
+  }
+  .tl-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9.5px;
+    color: var(--text-primary);
+    font-weight: 500;
+  }
+  .tl-desc {
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 9px;
+    color: var(--text-muted);
+    margin-top: 1px;
+  }
+
+  /* --- Pending Alerts --- */
+  .alerts-panel { grid-column: 1 / 3; }
+  .alert-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(37,44,56,0.35);
+  }
+  .alert-sev {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    font-weight: 700;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 2px;
+    min-width: 48px;
+    text-align: center;
+  }
+  .alert-sev.critical { background: var(--risk-red-dim); color: var(--risk-red); border: 1px solid rgba(239,68,68,0.25); }
+  .alert-sev.warning { background: var(--risk-amber-dim); color: var(--risk-amber); border: 1px solid rgba(245,166,35,0.2); }
+  .alert-sev.info { background: var(--smc-blue-dim); color: var(--smc-blue); border: 1px solid rgba(91,141,239,0.2); }
+  .alert-msg {
+    flex: 1;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9.5px;
+    color: var(--text-secondary);
+  }
+  .alert-time {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8.5px;
+    color: var(--text-muted);
+  }
+
+  /* --- Footer --- */
+  .footer-bar {
+    padding: 6px 16px;
+    border-top: 1px solid var(--border-subtle);
+    display: flex;
+    justify-content: space-between;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text-muted);
+    background: var(--bg-panel);
+  }
+</style>
+</head>
+<body>
+
+<!-- Nav Rail -->
+<nav class="nav-rail">
+  <div class="nav-logo">B</div>
+  <div class="nav-item active" title="Runtime">◉</div>
+  <div class="nav-item" title="Console">☰</div>
+  <div class="nav-item" title="Fast Desk">⚡</div>
+  <div class="nav-item" title="SMC Desk">◆</div>
+  <div class="nav-item" title="Ownership">⊞</div>
+  <div class="nav-item" title="Risk"><span class="badge"></span>⚑</div>
+  <div class="nav-item" title="Terminal">⊡</div>
+  <div class="nav-item" title="Mode">⇄</div>
+  <div class="nav-spacer"></div>
+  <div class="nav-item" title="Settings">⚙</div>
+</nav>
+
+<div class="main">
+  <!-- Status Strip -->
+  <div class="status-strip">
+    <div class="ss-chip"><span class="ss-dot up live-pulse"></span><span class="ss-label">MT5</span><span class="ss-value">Connected</span></div>
+    <div class="ss-chip"><span class="ss-dot up"></span><span class="ss-label">Feed</span><span class="ss-value">62 sym</span></div>
+    <div class="ss-chip"><span class="ss-dot up"></span><span class="ss-label">SSE</span><span class="ss-value">Active</span></div>
+    <div class="ss-chip"><span class="ss-dot up"></span><span class="ss-label">Fast</span><span class="ss-value">Running</span></div>
+    <div class="ss-chip"><span class="ss-dot up"></span><span class="ss-label">SMC</span><span class="ss-value">Running</span></div>
+    <div class="ss-chip"><span class="ss-dot degraded live-pulse"></span><span class="ss-label">Charts</span><span class="ss-value">2 stale</span></div>
+    <div class="ss-sep"></div>
+    <div class="ss-chip"><span class="ss-label">Mode</span><span class="ss-value" style="color:var(--pnl-green)">LIVE</span></div>
+    <div class="ss-chip"><span class="ss-label">Acct</span><span class="ss-value">#40817</span></div>
+    <div class="ss-chip"><span class="ss-label">Lat</span><span class="ss-value">12ms</span></div>
+    <div class="ss-time">14:32:18 UTC · Uptime 4h 12m</div>
+  </div>
+
+  <!-- Content Grid -->
+  <div class="content">
+    <!-- Broker Identity -->
+    <div class="panel broker-block">
+      <div class="panel-head">
+        <div class="panel-title"><span class="accent-dot" style="background:var(--smc-blue)"></span> Broker & Account Identity</div>
+      </div>
+      <div class="panel-body">
+        <div class="broker-grid">
+          <div class="broker-field"><label>Broker</label><div class="val">ICMarkets</div></div>
+          <div class="broker-field"><label>Server</label><div class="val">ICMarkets-Live07</div></div>
+          <div class="broker-field"><label>Account</label><div class="val accent-teal">#40817</div></div>
+          <div class="broker-field"><label>Type</label><div class="val">Raw Spread</div></div>
+          <div class="broker-field"><label>Leverage</label><div class="val">1:500</div></div>
+          <div class="broker-field"><label>Currency</label><div class="val">USD</div></div>
+          <div class="broker-field"><label>Terminal</label><div class="val">MetaTrader 5 b4490</div></div>
+          <div class="broker-field"><label>AutoTrading</label><div class="val" style="color:var(--pnl-green)">Enabled</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Account Snapshot -->
+    <div class="panel account-snap">
+      <div class="panel-head">
+        <div class="panel-title"><span class="accent-dot" style="background:var(--pnl-green)"></span> Account Snapshot</div>
+      </div>
+      <div class="panel-body">
+        <div class="snap-grid">
+          <div class="snap-item"><label>Balance</label><div class="val">$24,812</div></div>
+          <div class="snap-item"><label>Equity</label><div class="val green">$25,045</div></div>
+          <div class="snap-item"><label>Margin Used</label><div class="val">$3,240</div></div>
+          <div class="snap-item"><label>Free Margin</label><div class="val">$21,805</div></div>
+          <div class="snap-item"><label>Margin Level</label><div class="val">773%</div></div>
+          <div class="snap-item"><label>Float PnL</label><div class="val green">+$233</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chart Worker Matrix -->
+    <div class="panel worker-matrix">
+      <div class="panel-head">
+        <div class="panel-title"><span class="accent-dot" style="background:var(--fast-teal)"></span> Chart Workers</div>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;color:var(--text-muted)">10 subscribed</span>
+      </div>
+      <div class="panel-body">
+        <div class="worker-grid">
+          <div class="worker-card"><div class="sym">EURUSD</div><div class="state fresh">Fresh</div><div class="age">2s ago</div></div>
+          <div class="worker-card"><div class="sym">GBPJPY</div><div class="state fresh">Fresh</div><div class="age">3s ago</div></div>
+          <div class="worker-card"><div class="sym">XAUUSD</div><div class="state fresh">Fresh</div><div class="age">1s ago</div></div>
+          <div class="worker-card"><div class="sym">USDJPY</div><div class="state stale">Stale</div><div class="age">45s ago</div></div>
+          <div class="worker-card"><div class="sym">AUDUSD</div><div class="state fresh">Fresh</div><div class="age">4s ago</div></div>
+          <div class="worker-card"><div class="sym">NZDUSD</div><div class="state fresh">Fresh</div><div class="age">2s ago</div></div>
+          <div class="worker-card"><div class="sym">USDCAD</div><div class="state stale">Stale</div><div class="age">62s ago</div></div>
+          <div class="worker-card"><div class="sym">EURGBP</div><div class="state fresh">Fresh</div><div class="age">5s ago</div></div>
+          <div class="worker-card"><div class="sym">GBPUSD</div><div class="state fresh">Fresh</div><div class="age">3s ago</div></div>
+          <div class="worker-card"><div class="sym">EURJPY</div><div class="state fresh">Fresh</div><div class="age">1s ago</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Symbol Universe -->
+    <div class="panel symbol-universe">
+      <div class="panel-head">
+        <div class="panel-title"><span class="accent-dot" style="background:var(--text-secondary)"></span> Symbol Universe</div>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;color:var(--text-muted)">8 / 62 active</span>
+      </div>
+      <div class="panel-body-flush">
+        <table class="su-table">
+          <thead><tr><th>Symbol</th><th>Desk</th><th>Feed</th><th>Chart</th><th>Trade</th></tr></thead>
+          <tbody>
+            <tr><td>EURUSD</td><td><span class="su-sub-chip both">Both</span></td><td style="color:var(--pnl-green)">✓</td><td style="color:var(--pnl-green)">Fresh</td><td style="color:var(--pnl-green)">On</td></tr>
+            <tr><td>GBPJPY</td><td><span class="su-sub-chip smc">SMC</span></td><td style="color:var(--pnl-green)">✓</td><td style="color:var(--pnl-green)">Fresh</td><td style="color:var(--pnl-green)">On</td></tr>
+            <tr><td>XAUUSD</td><td><span class="su-sub-chip fast">Fast</span></td><td style="color:var(--pnl-green)">✓</td><td style="color:var(--pnl-green)">Fresh</td><td style="color:var(--pnl-green)">On</td></tr>
+            <tr><td>USDJPY</td><td><span class="su-sub-chip fast">Fast</span></td><td style="color:var(--pnl-green)">✓</td><td style="color:var(--risk-amber)">Stale</td><td style="color:var(--pnl-green)">On</td></tr>
+            <tr><td>AUDUSD</td><td><span class="su-sub-chip fast">Fast</span></td><td style="color:var(--pnl-green)">✓</td><td style="color:var(--pnl-green)">Fresh</td><td style="color:var(--pnl-green)">On</td></tr>
+            <tr><td>NZDUSD</td><td><span class="su-sub-chip both">Both</span></td><td style="color:var(--pnl-green)">✓</td><td style="color:var(--pnl-green)">Fresh</td><td style="color:var(--risk-amber)">Off</td></tr>
+            <tr><td>USDCAD</td><td><span class="su-sub-chip smc">SMC</span></td><td style="color:var(--pnl-green)">✓</td><td style="color:var(--risk-amber)">Stale</td><td style="color:var(--risk-amber)">Off</td></tr>
+            <tr><td>EURGBP</td><td><span class="su-sub-chip fast">Fast</span></td><td style="color:var(--pnl-green)">✓</td><td style="color:var(--pnl-green)">Fresh</td><td style="color:var(--pnl-green)">On</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- SSE Event Timeline -->
+    <div class="panel event-timeline">
+      <div class="panel-head">
+        <div class="panel-title"><span class="accent-dot" style="background:var(--smc-blue)"></span> SSE Event Timeline</div>
+      </div>
+      <div class="panel-body">
+        <div class="timeline-entries">
+          <div class="tl-entry">
+            <span class="tl-time">14:32:18</span>
+            <div class="tl-dot-col"><span class="tl-dot success"></span></div>
+            <div class="tl-content"><div class="tl-title">Chart refresh: EURUSD H1</div><div class="tl-desc">Worker completed, 412ms</div></div>
+          </div>
+          <div class="tl-entry">
+            <span class="tl-time">14:32:15</span>
+            <div class="tl-dot-col"><span class="tl-dot info"></span></div>
+            <div class="tl-content"><div class="tl-title">Fast trigger: XAUUSD</div><div class="tl-desc">Confidence 0.72, evaluating custody</div></div>
+          </div>
+          <div class="tl-entry">
+            <span class="tl-time">14:32:01</span>
+            <div class="tl-dot-col"><span class="tl-dot success"></span></div>
+            <div class="tl-content"><div class="tl-title">Order filled: #88415 AUDUSD BUY</div><div class="tl-desc">0.40 lots @ 0.6534, slippage 0.1 pip</div></div>
+          </div>
+          <div class="tl-entry">
+            <span class="tl-time">14:31:58</span>
+            <div class="tl-dot-col"><span class="tl-dot warn"></span></div>
+            <div class="tl-content"><div class="tl-title">Chart stale: USDJPY H4</div><div class="tl-desc">Last update 45s ago, threshold 30s</div></div>
+          </div>
+          <div class="tl-entry">
+            <span class="tl-time">14:31:44</span>
+            <div class="tl-dot-col"><span class="tl-dot info"></span></div>
+            <div class="tl-content"><div class="tl-title">SMC thesis validated: GBPJPY</div><div class="tl-desc">Bearish bias confirmed, OB + FVG confluence</div></div>
+          </div>
+          <div class="tl-entry">
+            <span class="tl-time">14:31:30</span>
+            <div class="tl-dot-col"><span class="tl-dot success"></span></div>
+            <div class="tl-content"><div class="tl-title">Position closed: #88398 USDJPY</div><div class="tl-desc">TP hit, PnL +$124</div></div>
+          </div>
+          <div class="tl-entry">
+            <span class="tl-time">14:31:12</span>
+            <div class="tl-dot-col"><span class="tl-dot warn"></span></div>
+            <div class="tl-content"><div class="tl-title">Chart stale: USDCAD M15</div><div class="tl-desc">Last update 62s ago, retry queued</div></div>
+          </div>
+          <div class="tl-entry">
+            <span class="tl-time">14:30:55</span>
+            <div class="tl-dot-col"><span class="tl-dot info"></span></div>
+            <div class="tl-content"><div class="tl-title">Fast trail: GBPJPY SL → 191.20</div><div class="tl-desc">Trailing stop updated, 15 pip offset</div></div>
+          </div>
+          <div class="tl-entry">
+            <span class="tl-time">14:30:41</span>
+            <div class="tl-dot-col"><span class="tl-dot error"></span></div>
+            <div class="tl-content"><div class="tl-title">Risk budget warning: Fast desk 78%</div><div class="tl-desc">Approaching limit, new entries may be blocked</div></div>
+          </div>
+          <div class="tl-entry">
+            <span class="tl-time">14:30:02</span>
+            <div class="tl-dot-col"><span class="tl-dot success"></span></div>
+            <div class="tl-content"><div class="tl-title">Startup complete</div><div class="tl-desc">All subsystems initialized in 2.4s</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pending Alerts -->
+    <div class="panel alerts-panel">
+      <div class="panel-head">
+        <div class="panel-title"><span class="accent-dot" style="background:var(--risk-amber)"></span> Pending Alerts</div>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;color:var(--risk-amber)">2 active</span>
+      </div>
+      <div class="panel-body">
+        <div class="alert-row">
+          <span class="alert-sev warning">WARN</span>
+          <span class="alert-msg">Chart workers USDJPY, USDCAD exceeded staleness threshold. Check data feed connectivity.</span>
+          <span class="alert-time">14:31:58</span>
+        </div>
+        <div class="alert-row">
+          <span class="alert-sev critical">CRIT</span>
+          <span class="alert-msg">Fast desk budget at 78% — approaching hard limit. Next trigger may be rejected.</span>
+          <span class="alert-time">14:30:41</span>
+        </div>
+        <div class="alert-row">
+          <span class="alert-sev info">INFO</span>
+          <span class="alert-msg">SMC review due for EURUSD thesis at 15:00 UTC. Validation window closing.</span>
+          <span class="alert-time">14:28:00</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="footer-bar">
+    <span>MT5 Bridge Control Plane — Runtime Overview</span>
+    <span>SSE: ws://localhost:8080/events</span>
+    <span>Solid.js · v0.1-concept</span>
+  </div>
+</div>
+
+</body>
+</html>

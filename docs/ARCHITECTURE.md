@@ -1,0 +1,851 @@
+# Architecture
+
+> **Status**: implemented and tested — March 2026
+> **Connector execution surface**: closed 2026-03-24 — all 5 missing public methods added and certified
+> **Ownership + Risk kernel**: phase closure delivered 2026-03-24 (`OwnershipRegistry`, auto-adoption, `RiskKernel`, API endpoints)
+> **Bootstrap conformance audit**: delivered 2026-03-25 — 4 bugs identified and repaired (RiskKernel async, MT5 lock serialization, hot-path disk I/O, sessions default)
+> **Fast Desk analysis audit**: delivered 2026-03-26 — 8 strategic gates added (RR, OB mitigation, premium/discount, market phase, exhaustion, EMA, BOS impulse, directional concentration)
+> **Slippage model**: corrected 2026-03-26 — percentage-based context gate + spec-driven execution slippage (replaces hardcoded point threshold)
+
+---
+
+## Purpose
+
+Two trading desks with incompatible latency requirements share one MT5 connection,
+one market-state RAM backbone, and one HTTP control plane.
+
+| Desk | Latency target | LLM | Entry |
+|------|---------------|-----|-------|
+| **Fast Desk** | seconds | never | `FAST_TRADER_ENABLED=true` (alias: `FAST_DESK_ENABLED=true`) |
+| **SMC Desk** | minutes | optional, after heuristics | `SMC_SCANNER_ENABLED=true` |
+
+**The closer logic is to execution, the less it may depend on LLM, disk, or network.**
+
+---
+
+## FastTraderService v1 (Immediate Phase)
+
+Fast execution now runs through `FastTraderService` with explicit layered contracts on `M1 + M5 + H1`:
+
+1. `FastContextService` builds H1 bias and hard gates (`session`, `spread`, `slippage`, `stale_feed`, regime, `market_phase`, `exhaustion_risk`, `ema_overextended`).
+2. `FastSetupEngine` detects M5 setups (`3 core + 4 patterns`) with structural filters:
+   - **Spread-aware SL**: widens SL by live spread distance before RR calculation.
+   - **Minimum RR gate**: rejects setups with effective RR < `FAST_TRADER_MIN_RR` (default 2.0).
+   - **OB mitigation filter**: skips order blocks where price already closed inside the zone.
+   - **Premium/Discount filter**: buy only in discount zone, sell only in premium zone (H1 impulse reference).
+   - **BOS impulse validation**: breakout-retest requires BOS candle body ≥ 1.2× average M5 body (reject weak/fake breakouts).
+3. `FastTriggerEngine` confirms with M1 trigger (`micro_bos`, `micro_choch`, `rejection_candle`, `reclaim`, `displacement`).
+4. Hard rule: no M5 setup can execute without a valid M1 trigger.
+5. Entry routing: retests prefer `pending`; reclaim/displacement prefer `market`.
+6. `FastPendingManager` controls pending lifecycle (`modify_order_levels` / `remove_order`).
+7. `FastCustodyEngine` applies professional custody (break-even, ATR trailing, structural trailing, hard cut, no passive underwater, optional scale-out).
+8. Custody scope is restricted to `fast_owned` and `inherited_fast`; no intervention over SMC-owned operations.
+9. Runtime integration uses `RiskKernel` and `OwnershipRegistry` as authorities through `CoreRuntimeService` hooks.
+
+### Context gates (v0.3.1)
+
+| Gate | Type | Logic |
+|------|------|-------|
+| Session | hard | Only trade during configured sessions (default: London, overlap, NY) |
+| Spread | hard | Percentage-based per asset class (forex/crypto/metals/indices), 3 tolerance levels |
+| Slippage | hard | `abs(tick - last_M1_close) / tick_price × 100 > max_slippage_pct` — universal, no symbol-specific hardcoding |
+| Stale feed | hard | Block if last M1 candle is older than `stale_feed_seconds` |
+| Market phase | hard | `m5_ranging` blocks trading — detected from M5 structure contraction |
+| EMA overextension | hard | Price > 2% from EMA20 on H1 → chasing, blocked |
+| Volatility regime | hard | `very_low` H1 volatility → `no_trade_regime` |
+| Exhaustion risk | soft | `high` exhaustion + setup confidence < 0.80 → skip setup (not a hard context block) |
+
+### Execution slippage (spec-driven)
+
+Execution `max_slippage_points` sent to MT5 is derived per-symbol from the broker's symbol specification:
+- Primary: `10% of trade_stops_level` (clamped to `[5, stops_level]`)
+- Fallback: `3 × typical spread` (from symbol spec)
+- Ultimate fallback: `30 points` (for unknown specs only)
+
+No global hardcoded slippage value is used.
+
+### Entry policy gates
+
+| Gate | Logic |
+|------|-------|
+| Duplicate prevention | Same symbol + same side already open → block |
+| Max positions | Total open ≥ `max_positions_total` → block |
+| Directional concentration | ≥ 70% of open positions (min 3) on same side → block new entries in that direction |
+
+Preflight source print bundle (canonical reading evidence):
+
+- `docs/fast_trader/results/2026-03-24_fast_trader_print_bundle/print_manifest.json`
+- `docs/fast_trader/results/2026-03-24_fast_trader_print_bundle/print_index.md`
+
+---
+
+## Full system diagram
+
+```mermaid
+graph TD
+    MT5[MetaTrader 5 terminal]
+
+    subgraph Core["CoreRuntimeService"]
+        MT5 -->|single owner · _mt5_lock| Conn[MT5Connector]
+        Conn --> SubMgr[SubscriptionManager]
+        SubMgr --> ChartReg["ChartRegistry\nChartWorker × symbol"]
+        ChartReg --> MS["MarketStateService\nRAM candles + indicators"]
+        Conn --> SR["SymbolSpecRegistry\nRAM · pip_size()"]
+        Conn --> AS["AccountState\nRAM · refresh 2s\npositions · orders · P&L"]
+        Conn --> DB[(SQLite\nruntime.db)]
+    end
+
+    subgraph CP["Control Plane  :8765"]
+        MS --> CP_status["/status · /chart · /specs\n/account · /positions · /exposure\n/catalog · /subscribe · /events SSE"]
+    end
+    AS --> CP_status
+    SR --> CP_status
+
+    subgraph FD["Fast Desk  FAST_DESK_ENABLED=true"]
+        MS --> FD_scan["FastScannerService\nEMA + volume + ATR"]
+        FD_scan --> FD_risk["FastRiskEngine\nlot-size · desk drawdown guard"]
+        FD_risk --> FD_rk["RiskKernel gate\nevaluate_entry_for_desk()\nkill-switch · budget · limits"]
+        FD_rk --> FD_policy["FastEntryPolicy\nno duplicate · max desk positions"]
+        FD_policy --> FD_worker["FastSymbolWorker × symbol\nscan 5s · custody 2s"]
+        AS --> FD_cust["FastCustodian\ntrail SL · lock profit · close"]
+        FD_cust --> FD_worker
+        FD_worker -->|via _mt5_call lock| Conn
+        FD_worker --> DB
+    end
+
+    subgraph SMC["SMC Desk  SMC_SCANNER_ENABLED=true"]
+        MS --> SMC_scan["SmcScannerService\nOB · FVG · liquidity · structure"]
+        SMC_scan -->|event queue| SMC_analyst["SmcAnalystService\nbias · scenario · candidates"]
+        SMC_analyst --> SMC_val["HeuristicValidator\nconfidence · pip filter"]
+        SMC_val -->|SMC_LLM_ENABLED| SMC_llm["LLM Validator\nGemma 3 12B · fallback"]
+        SMC_llm --> SMC_thesis["ThesisStore\nLRU + SQLite"]
+        SMC_thesis --> CP_status
+        SMC_thesis --> DB
+    end
+```
+
+---
+
+## Data bus rules
+
+```mermaid
+graph LR
+    RAM["RAM\nMarketStateService\nAccountState\nSpecRegistry"]
+    HTTP["HTTP\nControl Plane :8765"]
+    SQLite["SQLite\nruntime.db\noperational state only"]
+    MT5["MT5 API"]
+    DISK["Disk files\n❌ FORBIDDEN"]
+
+    MT5 -->|ingest| RAM
+    RAM -->|serve| HTTP
+    RAM -->|checkpoint| SQLite
+    HTTP -->|read| ExternalConsumer[WebUI / dashboard / SMC Trader]
+    SQLite -->|recover| RAM
+    RAM -.->|NEVER| DISK
+    HTTP -.->|NEVER| DISK
+```
+
+**Allowed data paths:**
+- MT5 API → RAM → HTTP → consumer
+- RAM → SQLite (operational persistence only)
+- SQLite → RAM (recovery at startup only)
+
+**Forbidden:**
+- Any component writing JSON/CSV/pickle to disk during runtime
+- Any component reading market state from disk during steady-state operation
+- Any direct `mt5.*` call outside `CoreRuntimeService._mt5_call()`
+
+---
+
+## CoreRuntimeService: data lifecycle
+
+```mermaid
+sequenceDiagram
+    participant App as apps/control_plane.py
+    participant Svc as CoreRuntimeService
+    participant MT5 as MT5Connector
+    participant RAM as MarketStateService
+    participant DB as SQLite
+
+    App->>Svc: bootstrap()
+    Svc->>MT5: connect()
+    Svc->>MT5: broker_identity()
+    Svc->>Svc: init_ownership_registry() [pure Python]
+    Svc->>DB: init_risk_kernel() [asyncio.to_thread · 4 SQLite ops]
+    Svc->>DB: purge_stale_broker_data()
+    Svc->>MT5: fetch_symbol_catalog()
+    Svc->>MT5: fetch_symbol_specs()
+    Svc->>RAM: _refresh_market_state(force_checkpoint=True)
+    Svc->>MT5: fetch_account_runtime()
+    RAM-->>Svc: ready
+    App->>Svc: run_forever()
+
+    loop every MT5_POLL_SECONDS
+        Svc->>MT5: fetch_snapshot()
+        MT5-->>RAM: update candles
+    end
+    loop every CORE_ACCOUNT_REFRESH_SECONDS (2s)
+        Svc->>MT5: fetch_account_runtime()
+        MT5-->>Svc: positions · orders · P&L
+        Svc->>DB: replace_position_cache()
+    end
+```
+
+---
+
+## Fast Desk: per-symbol cycle
+
+```mermaid
+sequenceDiagram
+    participant W as FastSymbolWorker
+    participant Trader as FastTraderService
+    participant Risk as FastRiskEngine
+    participant Policy as FastEntryPolicy
+    participant Cust as FastCustodian
+    participant Exec as FastExecutionBridge
+    participant DB as SQLite
+
+    loop every scan_interval (5s) — asyncio.to_thread
+        W->>Conn: symbol_tick() via _mt5_call [lock]
+        W->>Trader: scan_and_execute(...)
+
+        alt setup + trigger + policy allow execution
+            W->>Risk: check_account_safe() [FastRiskEngine — desk drawdown]
+            W->>Risk: calculate_lot_size()
+            W->>Core: evaluate_entry_for_desk() [RiskKernel gate — kill-switch · budget]
+            W->>Policy: can_open(symbol, side, fast_owned_positions)
+            alt allowed
+                W->>Exec: send_entry() via _mt5_call [lock]
+                W->>DB: upsert_fast_signal() [outcome only]
+                W->>DB: append_fast_trade_log()
+            end
+        end
+    end
+
+    loop every custody_interval (2s) — asyncio.to_thread
+        W->>Conn: symbol_tick() via _mt5_call [lock]
+        W->>Cust: evaluate(position, current_price, pip_size)
+        alt TRAIL_SL
+            W->>Exec: apply_custody(TRAIL_SL, new_sl, position=pos) via _mt5_call [lock]
+            Exec->>Conn: modify_position_levels(symbol, position_id, stop_loss, tp=current_tp unless explicitly changed)
+        else CLOSE
+            W->>Exec: apply_custody(CLOSE, position=pos) via _mt5_call [lock]
+            Exec->>Conn: close_position(symbol, position_id, side, volume)
+        else HOLD
+            Note over W: no action
+        end
+        W->>DB: append_fast_trade_log()
+    end
+```
+
+### Custody rules (deterministic, no LLM)
+
+| Condition | Action |
+|-----------|--------|
+| floating profit ≥ 2 × risk_distance_pips | `TRAIL_SL` — move SL to breakeven + 1 pip |
+| floating profit ≥ 3 × risk_distance_pips | `TRAIL_SL` — lock 50% of profit |
+| floating loss > 1.2 × risk_distance_pips | `CLOSE` — slippage exceeded |
+| otherwise | `HOLD` |
+
+### Fast Desk RR contract
+
+- Fast Desk uses a single desk-wide RR value.
+- `FAST_TRADER_RR_RATIO` is the operator-facing setting from `.env` and WebUI.
+- The setup layer syncs its effective `min_rr` to that same value to avoid conflicting RR thresholds inside the same desk.
+- Custody level modifications must preserve the current TP when only the SL is being adjusted.
+
+---
+
+## SMC Desk: event-driven pipeline
+
+```mermaid
+sequenceDiagram
+    participant Scan as SmcScannerService
+    participant Q as asyncio.Queue
+    participant Disp as _dispatch_loop
+    participant Analyst as SmcAnalystService
+    participant Val as HeuristicValidator
+    participant LLM as LLM Validator
+    participant Store as ThesisStore
+
+    loop every scan interval
+        Scan->>Scan: run detection pipeline (all symbols)
+        Scan-->>Q: (event_type, symbol, payload)
+    end
+
+    loop dispatch
+        Q-->>Disp: event
+        Disp->>Disp: check cooldown (300s per symbol)
+        Disp->>Analyst: run_smc_heuristic_analyst()
+        Analyst->>Val: validate(thesis)
+        alt heuristics pass
+            Val->>LLM: validate (if SMC_LLM_ENABLED)
+            LLM-->>Val: confirmation | skip
+        end
+        Val-->>Store: save_thesis()
+    end
+```
+
+### SMC detection pipeline
+
+```mermaid
+graph LR
+    Candles["Candles D1/H4\nfrom RAM"] --> Struct["structure.py\nBOS · CHoCH (confirmed) · trend"]
+    Candles --> OB["order_blocks.py\nOB + mitigated flag\nstructure_break: bos|choch"]
+    Candles --> FVG["fair_value_gaps.py\nFVG + mitigated flag"]
+    Candles --> Liq["liquidity.py\nsweep quality clean|deep\ntaken tracking"]
+    Candles --> Fib["fibonacci.py\nretracement levels"]
+    Candles --> Elliott["elliott.py\nwave labels\n+ Fibo cross-validation"]
+    Struct & OB & FVG & Liq & Fib & Elliott --> Conf["confluences.py\nweighted scoring\nsweep→CHoCH corr"]
+    Conf --> Analyst["SmcAnalystService\nbias · min-confluence gate\nanti-D1 guard · ATR SL"]
+```
+
+#### Detection fields added (v0.3.0 audit)
+
+| Module | New fields | Purpose |
+|--------|-----------|----------|
+| `structure.py` | `last_choch.confirmed` | True when follow-through BOS confirms CHoCH |
+| `order_blocks.py` | `mitigated`, `structure_break` | Zone lifecycle + BOS vs CHoCH origin |
+| `fair_value_gaps.py` | `mitigated` | Zone lifecycle tracking |
+| `liquidity.py` | `sweep_quality`, `taken` | Sweep classification + spent zone tracking |
+| `confluences.py` | weighted scoring, `sweep_choch_corr`, `ob_unmitigated`, `fvg_unmitigated`, `choch_confirmed` | Conviction-based quality score |
+| `elliott.py` | Fibo retrace validation | W2/W4 depth + W3 extension checks |
+
+---
+
+## Control Plane endpoints
+
+```mermaid
+graph LR
+    CP["Control Plane\n:8765"]
+    CP --> E1["GET /status\nhealth + full live state"]
+    CP --> E2["GET /chart/symbol/tf\nRAM candles + context"]
+    CP --> E3["GET /specs\nGET /specs/symbol"]
+    CP --> E4["GET /account\nraw account payload"]
+    CP --> E5["GET /positions\npositions + orders list"]
+    CP --> E6["GET /exposure\naggregate by symbol"]
+    CP --> E7["GET /catalog\nbroker symbol catalog"]
+    CP --> E8["POST /subscribe\nPOST /unsubscribe"]
+    CP --> E9["GET /events?interval=1.0\nSSE live stream"]
+```
+
+Ownership and risk operational surface (same control plane, no extra external interface):
+
+- `GET /ownership`
+- `GET /ownership/open`
+- `GET /ownership/history`
+- `POST /ownership/reassign`
+- `GET /risk/status`
+- `GET /risk/limits`
+- `GET /risk/profile`
+- `PUT /risk/profile`
+- `POST /risk/kill-switch/trip`
+- `POST /risk/kill-switch/reset`
+
+---
+
+## SQLite schema (current tables)
+
+All tables with broker-dependent data carry `(broker_server, account_login)` in their primary key.
+
+```mermaid
+erDiagram
+    symbol_catalog_cache {
+        TEXT broker_server PK
+        INTEGER account_login PK
+        TEXT symbol PK
+        TEXT raw_json
+        TEXT updated_at
+    }
+    symbol_spec_cache {
+        TEXT broker_server PK
+        INTEGER account_login PK
+        TEXT symbol PK
+        REAL pip_size
+        TEXT raw_json
+        TEXT updated_at
+    }
+    account_state_cache {
+        TEXT broker_server PK
+        INTEGER account_login PK
+        TEXT raw_json
+        TEXT updated_at
+    }
+    position_cache {
+        TEXT broker_server PK
+        INTEGER account_login PK
+        INTEGER position_id PK
+        TEXT raw_json
+        TEXT updated_at
+    }
+    order_cache {
+        TEXT broker_server PK
+        INTEGER account_login PK
+        INTEGER order_id PK
+        TEXT raw_json
+        TEXT updated_at
+    }
+    smc_zones {
+        TEXT broker_server PK
+        INTEGER account_login PK
+        TEXT zone_id PK
+        TEXT symbol
+        TEXT evidence_json
+        TEXT created_at
+    }
+    smc_thesis_cache {
+        TEXT broker_server PK
+        INTEGER account_login PK
+        TEXT symbol PK
+        TEXT thesis_json
+        TEXT updated_at
+    }
+    smc_events_log {
+        TEXT broker_server PK
+        INTEGER account_login PK
+        TEXT event_id PK
+        TEXT symbol
+        TEXT event_type
+        TEXT logged_at
+    }
+    fast_desk_signals {
+        TEXT broker_server PK
+        INTEGER account_login PK
+        TEXT signal_id PK
+        TEXT symbol
+        TEXT side
+        TEXT trigger
+        REAL confidence
+        TEXT generated_at
+    }
+    fast_desk_trade_log {
+        TEXT broker_server PK
+        INTEGER account_login PK
+        TEXT log_id PK
+        TEXT symbol
+        TEXT action
+        INTEGER position_id
+        TEXT logged_at
+    }
+```
+
+Additional operational tables introduced for ownership/risk closure:
+
+- `operation_ownership`
+- `operation_ownership_events`
+- `risk_profile_state`
+- `risk_budget_state`
+- `risk_events_log`
+
+Table for SMC trader execution audit (introduced in Step 4):
+
+```mermaid
+erDiagram
+    smc_trade_log {
+        TEXT broker_server PK
+        INTEGER account_login PK
+        TEXT log_id PK
+        TEXT symbol
+        TEXT action
+        INTEGER position_id
+        TEXT signal_id
+        TEXT details_json
+        TEXT logged_at
+    }
+```
+
+---
+
+## Multi-broker model
+
+The system is designed for N parallel MT5 instances from day one.
+
+```mermaid
+graph TD
+    T1["MT5 terminal 1\nFBS-Demo :105845678"] --> CP1["CoreRuntimeService 1\nControl Plane :8765"]
+    T2["MT5 terminal 2\nICMarkets :987654"] --> CP2["CoreRuntimeService 2\nControl Plane :8766"]
+    CP1 --> DB1[("runtime.db\nbroker_server=FBS-Demo\naccount_login=105845678")]
+    CP2 --> DB2[("runtime.db\nbroker_server=ICMarkets\naccount_login=987654")]
+```
+
+Each instance has its own SQLite partition. Data never crosses between brokers.
+
+---
+
+## MT5Connector public execution surface
+
+All write paths check `_ensure_trading_available()` before calling `order_send`.
+
+```mermaid
+graph TD
+    subgraph ConnSurface["MT5Connector — execution surface"]
+        PF["_ensure_trading_available()\nverify account_info · terminal_info\ncheck trade_allowed · ACCOUNT_MODE guard"]
+
+        M1["send_execution_instruction(instruction)\nopen market · limit · stop orders"]
+        M2["modify_position_levels(symbol, position_id, sl, tp)\nTRADE_ACTION_SLTP"]
+        M3["modify_order_levels(symbol, order_id, price, sl, tp)\nTRADE_ACTION_MODIFY"]
+        M4["remove_order(order_id)\nTRADE_ACTION_REMOVE"]
+        M5["close_position(symbol, position_id, side, volume, slippage)\nopposite-side market deal · full + partial"]
+        M6["find_open_position_id(symbol, comment)\npositions_get + exact comment match\nreturns None when comment empty"]
+
+        PF --> M1
+        PF --> M2
+        PF --> M3
+        PF --> M4
+        PF --> M5
+    end
+```
+
+### Preflight contract
+
+Before every write action the connector verifies:
+
+1. `mt5.account_info()` is not `None`
+2. `mt5.terminal_info()` is not `None`
+3. `terminal_info().trade_allowed` is `True`
+4. `ACCOUNT_MODE` guard — if `ACCOUNT_MODE=demo`, real-account connections are blocked
+
+Failure raises `MT5ConnectorError` with actionable text.
+
+> **Note**: `probe_account()` is intentionally NOT called inside preflight. Certification
+> confirmed that a failed `probe_account()` can degrade the terminal session and disable
+> `AutoTrading`. All write methods are independent of account-probe side effects.
+
+### Known comment limitation
+
+Certification on the current broker confirmed:
+- Execution with `comment=""` succeeds.
+- Execution with a populated `comment` may be rejected (`Invalid "comment" argument`).
+- All write methods allow empty comment and never require a non-empty one.
+- `find_open_position_id()` works when comments are populated, but returns `None` when
+  comment is empty — it never raises on comment-not-found.
+
+---
+
+## What must never enter the codebase
+
+| Pattern | Reason |
+|---------|--------|
+| `core_runtime.json` or any live JSON written to disk | disk is not the data bus |
+| `CORE_LIVE_PUBLISH_SECONDS` loop | same |
+| `pip_size_for_symbol()` or hardcoded pip values | must use `SymbolSpecRegistry` |
+| `bid`, `ask`, `last_price` in any SQLite column | volatile — RAM only |
+| `symbol` alone as PK for broker-dependent tables | broker partitioning required |
+| `mt5.*` calls outside `_mt5_call` serializer | MT5 API is not thread-safe |
+| Office-style roles (chairman, analyst-supervisor, memory_curator) in Fast Desk | latency budget exceeded |
+| Hardcoded `max_slippage_points` for all symbols | must derive from symbol spec (`trade_stops_level`, `spread`) |
+| Fixed-point thresholds for cross-asset-class comparisons | must use percentage or spec-normalized values |
+
+
+- `Fast Desk`: scalping / fast intraday execution and custody — heuristic only, no LLM
+- `SMC Desk`: slower prepared setups, deeper context, optional LLM reasoning
+- `Shared Core`: all operational infrastructure shared by both desks
+- `Control Plane`: HTTP server — the only external interface to runtime state
+
+The old repository proved that these two workloads cannot be orchestrated through the same role stack.
+
+## Architectural principle
+
+The closer the logic is to execution time, the less it should depend on LLM, disk, or external services.
+
+```text
+Fast Desk: no LLM, no disk I/O in hot path
+SMC Desk:  LLM allowed, but only after heuristic filters pass
+```
+
+## Top-level design
+
+```text
+MT5 terminal(s)
+  -> ConnectorIngress  (single MT5 API owner)
+      -> SubscriptionManager
+      -> ChartWorker[symbol] × N   ← RAM only
+      -> MarketStateService        ← RAM only
+      -> SymbolSpecRegistry        ← RAM only
+      -> AccountState              ← RAM + SQLite
+      -> BrokerSessionsService     ← RAM only
+      -> IndicatorBridge           ← RAM apply-only
+  -> CoreRuntimeService
+      -> Control Plane HTTP  (FastAPI, 0.0.0.0:8765)
+          -> WebUI           (any web framework, consumes HTTP/SSE)
+          -> Fast Desk Runtime
+          -> SMC Desk Runtime
+```
+
+---
+
+## Ownership and data boundaries
+
+### What MUST live in RAM only
+
+| Data domain | Owner | Reason |
+|---|---|---|
+| OHLC chart candles (deque) | `ChartWorker[symbol]` | Hot path, tick-level update frequency |
+| Current bid / ask / spread | `ChartWorker[symbol]` | Changes multiple times per second |
+| Feed status (tick age, bar age) | `ChartWorker[symbol]` | Volatile, meaningless as persisted value |
+| Indicator enrichment (applied) | `MarketStateService` | Applied to chart in RAM, no disk copy |
+| Symbol specs (typed) | `SymbolSpecRegistry` | Loaded at startup, accessed every signal cycle |
+| Broker session windows | `BrokerSessionsService.registry` | Live state, refreshed by MQL5 EA |
+| Chart context (built view) | `MarketStateService` | Derived on demand from RAM candles |
+
+### What is allowed in SQLite (operational persistence only)
+
+| Data domain | Table | Notes |
+|---|---|---|
+| Full broker symbol catalog | `symbol_catalog_cache` | Partitioned by `(broker_server, account_login)` |
+| Symbol specifications | `symbol_spec_cache` | Partitioned by `(broker_server, account_login, symbol)` |
+| Account state | `account_state_cache` | Recovery only |
+| Open positions | `position_cache` | Recovery only |
+| Pending orders | `order_cache` | Recovery only |
+| Exposure state | `exposure_cache` | Recovery only |
+| Execution events | `execution_event_cache` | Audit trail |
+| Market state checkpoint | `market_state_cache` | Candle structure only — NO `bid`/`ask`/`tick_age` |
+
+### What MUST NOT exist anywhere on disk
+
+- `storage/live/core_runtime.json` — must not exist
+- `storage/live/` — directory must not exist
+- `storage/indicator_snapshots/*.json` — must not exist
+- Any file containing `bid`, `ask`, or live prices written during runtime
+- Any SQLite column named `bid`, `ask`, `last_price`, `tick_age_seconds`, `bar_age_seconds`, `feed_status`
+
+---
+
+## Shared Core
+
+### Responsibilities
+
+- connect to MetaTrader5 (single owner: `ConnectorIngress`)
+- maintain `SubscriptionManager` (catalog / bootstrap / subscribed universes)
+- keep chart state in RAM via `ChartWorker` + `MarketStateService`
+- normalize all timestamps to UTC0 before storage
+- maintain broker session awareness via `BrokerSessionsService`
+- enrich indicators into RAM via `IndicatorBridge` (file-in, RAM-out)
+- persist operationally necessary data to SQLite (partitioned by broker/account)
+- expose account / positions / orders
+- execute orders against MT5 via `ExecutionBridge`
+- expose runtime state via Control Plane HTTP
+
+### Key constraint: single MT5 API owner
+
+```text
+CORRECT:
+  ConnectorIngress → fans out updates to ChartWorker[symbol] × N
+
+FORBIDDEN:
+  ChartWorker[symbol] → calls mt5.copy_rates_from_pos() directly
+  AccountRefresher    → calls mt5.account_info() while ConnectorIngress is also running
+```
+
+The `MT5Connector` must be accessed only through the `_mt5_lock` / `_mt5_call` serializer in `CoreRuntimeService`.
+
+### Multi-broker model
+
+The system is designed from the ground up for N parallel MT5 instances:
+- one `CoreRuntimeService` per MT5 terminal
+- each with its own `ConnectorIngress`, `ChartRegistry`, `SpecRegistry`
+- each with its own SQLite partition (`broker_server` + `account_login`)
+- each with its own Control Plane HTTP port (or a multi-instance router)
+- data from different brokers never shares a RAM structure or SQLite table row
+
+### UTC0 normalization rule
+
+The broker server operates in its own timezone (e.g. UTC+2 for FBS, EET). This offset is measured at startup:
+- `server_time_offset_seconds` is applied **once** during ingestion to produce UTC0 timestamps
+- all internal timestamps, SQLite records, and chart candles are in UTC0
+- `server_time_offset_seconds` is NOT stored as a chart field or propagated downstream
+
+---
+
+## Fast Desk
+
+### Goal
+
+React in very low latency to market conditions using deterministic heuristics only.
+
+### Critical-path pipeline
+
+```text
+ChartWorker[symbol] RAM update
+  -> fast_signal_engine   (deterministic heuristics)
+  -> fast_risk_engine     (account limits, position checks)
+  -> fast_execution_custodian
+  -> ExecutionBridge      (MT5 order)
+```
+
+### Rules
+
+- no LLM anywhere in the hot path
+- no disk I/O in signal or custody cycle
+- no blocking HTTP calls in signal cycle
+- no memory curator role
+- consumes chart state from RAM reference or Control Plane HTTP — never from any file
+
+### Worker model
+
+- one signal worker per subscribed symbol
+- one custody worker per open position
+- one account guard worker
+- one execution worker
+
+### Heuristic library
+
+The Fast Desk replaces prompt-era domain knowledge with:
+- deterministic heuristics (typed Python functions)
+- explicit validators
+- typed risk policies
+- explicit runtime state per symbol and per position
+
+### Performance target
+
+- deterministic cycle: milliseconds to low seconds
+- no LLM slots in the path
+- no disk latency in the path
+
+---
+
+## SMC Desk
+
+### Goal
+
+Execute prepared setups using heuristics first, with optional LLM validation as a final gate.
+
+### SMC pipeline
+
+```text
+MarketStateService RAM
+  -> smc_heuristic_scanner       (detects zones, mitigation lifecycle, sweep events)
+  -> smc_heuristic_analyst        (weighted confluences, min-2 gate, anti-D1 guard, ATR SL)
+  -> smc_heuristic_validators     (confidence & pip filters)
+  -> optional multimodal LLM validator  (only if heuristics pass)
+  -> smc_thesis
+  -> smc_trader  (SMC_TRADER_ENABLED=true — Step 4)
+```
+
+#### Scanner zone lifecycle
+
+| Status | Meaning |
+|--------|---------|
+| `active` | Zone alive, not yet approached |
+| `approaching` | Price within `SMC_ZONE_APPROACH_PCT` |
+| `mitigated` | Price entered zone body (OB/FVG only) — single-use consumption |
+| `invalidated` | Price closed beyond zone boundary — structural break |
+
+#### Analyst gates (v0.3.0)
+
+1. **Minimum 2 confluences** — zones with < 2 confluences are silently dropped.
+2. **Anti-D1 guard** — when candidate side opposes D1 trend, require H4 CHoCH `confirmed=True`.
+3. **ATR-calibrated SL** — stop-loss margin floored at `1.2 × ATR(H4, 14)` to avoid noise stops.
+
+`SmcDeskService.run_forever()` must receive the same authority hooks as the fast desk:
+- `risk_gate_ref: Callable[[str], dict]` — delegates to `RiskKernel.evaluate_entry(desk="smc", symbol=...)`
+- `ownership_register_ref: Callable` — registers executed orders via `OwnershipRegistry`
+
+New env vars introduced in Step 4: `SMC_TRADER_ENABLED` (default `false`), `SMC_TRADER_RISK_PERCENT` (default `1.0`).
+
+### LLM role
+
+Allowed because latency is acceptable. But the LLM:
+
+- must not invent price levels
+- must not override heuristic invalidations
+- must not receive raw OHLC arrays
+- receives only: compact heuristic thesis + chart image + minimal metadata
+- never blocks the Fast Desk
+
+---
+
+## Control Plane
+
+The Control Plane is the **only external interface** to runtime state.
+
+**No external consumer reads disk files. All state is served via HTTP.**
+
+### Minimum API contract
+
+| Method | Route | Returns |
+|---|---|---|
+| `GET` | `/status` | health, broker identity, universes, worker counts |
+| `GET` | `/chart/{symbol}/{timeframe}` | chart context + candles from RAM |
+| `GET` | `/specs/{symbol}` | symbol spec from `SymbolSpecRegistry` |
+| `GET` | `/account` | account state from RAM |
+| `GET` | `/positions` | open positions from RAM |
+| `GET` | `/catalog` | broker symbol catalog |
+| `POST` | `/subscribe` | adds symbol to subscribed universe |
+| `POST` | `/unsubscribe` | removes symbol from subscribed universe |
+| `GET` | `/events` | SSE stream of chart updates |
+
+### Configuration
+
+- `CONTROL_PLANE_HOST=0.0.0.0` (accessible from network)
+- `CONTROL_PLANE_PORT=8765`
+
+---
+
+## WebUI
+
+A separate frontend process (any web framework: Vite/React, Node.js, Svelte).
+
+- consumes Control Plane HTTP and SSE only
+- no Python code, no disk access
+- exposed on its own port (e.g. `3000` or `5173`)
+
+---
+
+## SQLite persistence policy
+
+### Allowed tables and their purpose
+
+All broker-dependent tables use `(broker_server, account_login)` as part of the primary key.
+
+On broker/account change detection: stale rows for the previous identity are purged before loading new data.
+
+### Forbidden patterns
+
+```sql
+-- FORBIDDEN: symbol alone as PK for broker-dependent data
+CREATE TABLE symbol_spec_cache (symbol TEXT PRIMARY KEY, ...)
+
+-- CORRECT:
+CREATE TABLE symbol_spec_cache (
+    broker_server TEXT NOT NULL,
+    account_login INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    PRIMARY KEY (broker_server, account_login, symbol),
+    ...
+)
+```
+
+```sql
+-- FORBIDDEN: dynamic feed fields in any table
+bid REAL,
+ask REAL,
+last_price REAL,
+tick_age_seconds REAL,
+bar_age_seconds REAL,
+feed_status TEXT,
+```
+
+---
+
+## What must not enter the codebase
+
+- `core_runtime.json` or any live JSON file written by the runtime
+- `CORE_LIVE_PUBLISH_SECONDS` variable or any live publish loop
+- `persist_json()` called from any runtime loop
+- `pip_size_for_symbol()` or any hardcoded symbol heuristic (use `SymbolSpecRegistry`)
+- `storage/live/` directory
+- `storage/indicator_snapshots/` as a write target
+- `bid`/`ask` columns in `symbol_spec_cache` or `market_state_cache`
+- Any direct `mt5.*` call outside of `ConnectorIngress` / `_mt5_call`
+
+---
+
+## Migration policy
+
+From `llm-metatrader5-bridge`:
+
+- copy Shared Core infrastructure that passes the above rules
+- redesign desks to consume RAM state, not disk state
+- re-import only what survives the architecture contracts
+- do not copy office-style role stacks (chairman, supervisor, memory_curator) into the fast path

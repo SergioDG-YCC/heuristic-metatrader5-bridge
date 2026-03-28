@@ -1,0 +1,2 @@
+"""SMC trader logic."""
+
