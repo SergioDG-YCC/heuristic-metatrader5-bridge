@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -16,6 +17,8 @@ from heuristic_mt5_bridge.fast_desk.setup import FastSetupConfig
 from heuristic_mt5_bridge.fast_desk.state.desk_state import SymbolDeskState
 from heuristic_mt5_bridge.fast_desk.trader import FastTraderConfig, FastTraderService
 from heuristic_mt5_bridge.fast_desk.trigger import FastTriggerConfig
+
+logger = logging.getLogger("fast_desk.worker")
 
 
 @dataclass
@@ -69,6 +72,8 @@ class FastSymbolWorker:
         custody_config: FastCustodyPolicyConfig | None = None,
         trader_config: FastTraderConfig | None = None,
         mt5_call_ref: Callable | None = None,
+        allow_entries: bool = True,
+        transient_custody_symbol: bool = False,
     ) -> None:
         effective_setup_config = setup_config or FastSetupConfig(
             rr_ratio=float(getattr(scanner_config, "rr_ratio", 3.0) or 3.0),
@@ -109,6 +114,7 @@ class FastSymbolWorker:
                     ownership_register_ref=ownership_register_ref,
                     ownership_open_ref=ownership_open_ref,
                     mt5_call_ref=mt5_call_ref,
+                    allow_entries=allow_entries,
                 ),
                 name=f"fast_scan_{symbol}",
             )
@@ -127,6 +133,7 @@ class FastSymbolWorker:
                     risk_action_ref=risk_action_ref,
                     ownership_open_ref=ownership_open_ref,
                     mt5_call_ref=mt5_call_ref,
+                    transient_custody_symbol=transient_custody_symbol,
                 ),
                 name=f"fast_custody_{symbol}",
             )
@@ -149,6 +156,7 @@ class FastSymbolWorker:
         ownership_register_ref: Callable[[dict[str, Any], str, str, str | None], list[dict[str, Any]]] | None = None,
         ownership_open_ref: Callable[[], list[dict[str, Any]]] | None = None,
         mt5_call_ref: Callable | None = None,
+        allow_entries: bool = True,
     ) -> None:
         while True:
             await self._run_scan(
@@ -166,6 +174,7 @@ class FastSymbolWorker:
                 ownership_register_ref=ownership_register_ref,
                 ownership_open_ref=ownership_open_ref,
                 mt5_call_ref=mt5_call_ref,
+                allow_entries=allow_entries,
             )
             await asyncio.sleep(config.scan_interval)
 
@@ -185,6 +194,7 @@ class FastSymbolWorker:
         risk_action_ref: Callable[[str], dict[str, Any]] | None = None,
         ownership_open_ref: Callable[[], list[dict[str, Any]]] | None = None,
         mt5_call_ref: Callable | None = None,
+        transient_custody_symbol: bool = False,
     ) -> None:
         while True:
             await self._run_custody(
@@ -200,6 +210,7 @@ class FastSymbolWorker:
                 risk_action_ref=risk_action_ref,
                 ownership_open_ref=ownership_open_ref,
                 mt5_call_ref=mt5_call_ref,
+                transient_custody_symbol=transient_custody_symbol,
             )
             await asyncio.sleep(config.custody_interval)
 
@@ -221,9 +232,12 @@ class FastSymbolWorker:
         ownership_register_ref: Callable[[dict[str, Any], str, str, str | None], list[dict[str, Any]]] | None = None,
         ownership_open_ref: Callable[[], list[dict[str, Any]]] | None = None,
         mt5_call_ref: Callable | None = None,
+        allow_entries: bool = True,
     ) -> None:
         _ = config
         if self._trader is None:
+            return
+        if not allow_entries:
             return
         # Pre-fetch tick via _mt5_lock before entering the thread so the read
         # is serialised with CoreRuntime market-state refreshes.
@@ -275,9 +289,18 @@ class FastSymbolWorker:
         risk_action_ref: Callable[[str], dict[str, Any]] | None = None,
         ownership_open_ref: Callable[[], list[dict[str, Any]]] | None = None,
         mt5_call_ref: Callable | None = None,
+        transient_custody_symbol: bool = False,
     ) -> None:
         if self._trader is None:
             return
+        if transient_custody_symbol:
+            await self._hydrate_transient_symbol_state(
+                symbol=symbol,
+                market_state=market_state,
+                spec_registry=spec_registry,
+                connector=connector,
+                mt5_call_ref=mt5_call_ref,
+            )
         # Pre-fetch tick via _mt5_lock; also build sync executor for write calls.
         prefetched_tick: dict[str, Any] | None = None
         mt5_execute_sync: Callable | None = None
@@ -309,3 +332,37 @@ class FastSymbolWorker:
             raise
         except Exception as exc:
             print(f"[fast-desk] custody error ({symbol}): {exc}")
+
+    async def _hydrate_transient_symbol_state(
+        self,
+        *,
+        symbol: str,
+        market_state: MarketStateService,
+        spec_registry: SymbolSpecRegistry,
+        connector: Any,
+        mt5_call_ref: Callable | None,
+    ) -> None:
+        # Ensure spec is available for custody (pip_size / execution constraints).
+        if spec_registry.get(symbol) is None:
+            try:
+                if mt5_call_ref is not None:
+                    spec = await mt5_call_ref(connector.fetch_symbol_specification, symbol)
+                else:
+                    spec = await asyncio.to_thread(connector.fetch_symbol_specification, symbol)
+                if isinstance(spec, dict):
+                    spec_registry.update([spec])
+            except Exception as exc:
+                logger.debug("[%s] transient spec hydrate failed: %s", symbol, exc)
+
+        for timeframe in ("M1", "M5", "M30"):
+            if len(market_state.get_candles(symbol, timeframe, 220)) >= 40:
+                continue
+            try:
+                if mt5_call_ref is not None:
+                    snapshot = await mt5_call_ref(connector.fetch_snapshot, symbol, timeframe, 260)
+                else:
+                    snapshot = await asyncio.to_thread(connector.fetch_snapshot, symbol, timeframe, 260)
+                if isinstance(snapshot, dict):
+                    market_state.ingest_snapshot(snapshot, source="fast_custody_transient")
+            except Exception as exc:
+                logger.debug("[%s/%s] transient chart hydrate failed: %s", symbol, timeframe, exc)

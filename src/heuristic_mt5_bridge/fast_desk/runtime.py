@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -319,6 +321,7 @@ class FastDeskService:
         )
 
         worker_tasks: dict[str, asyncio.Task[None]] = {}
+        worker_modes: dict[str, tuple[bool, bool]] = {}  # symbol -> (allow_entries, transient_custody_symbol)
         reconcile_sleep = max(0.5, min(cfg.scan_interval, cfg.guard_interval, 2.0))
         # Track previous rejected reasons to only log/emit on state changes
         _prev_rejected: dict[str, str] = {}
@@ -329,10 +332,29 @@ class FastDeskService:
                     subscribed_symbols_ref,
                     allowed_sessions=cfg.allowed_sessions,
                 )
-                desired_set = set(desired_symbols)
+                entry_symbols = list(desired_symbols)
+                entry_set = set(entry_symbols)
+                subscribed_set = {
+                    normalize_symbol(item)
+                    for item in (subscribed_symbols_ref() if subscribed_symbols_ref is not None else [])
+                    if normalize_symbol(item)
+                }
+
+                forced_custody_symbols = self._forced_custody_symbols(ownership_open_ref)
+                transient_symbols = {sym for sym in forced_custody_symbols if sym not in subscribed_set}
+
+                desired_all: list[str] = list(entry_symbols)
+                for sym in forced_custody_symbols:
+                    if sym not in desired_all:
+                        desired_all.append(sym)
+                desired_set = set(desired_all)
 
                 # --- Emit market state changes for rejected symbols ---
                 for sym, reason in rejected.items():
+                    if sym in forced_custody_symbols:
+                        # Ownership custody takes precedence over entry/session gates.
+                        self._emit_market_gate(sym, "custody_forced")
+                        continue
                     prev = _prev_rejected.get(sym)
                     if prev != reason:
                         logger.info("[%s] worker NOT started: %s", sym, reason)
@@ -341,7 +363,7 @@ class FastDeskService:
                 for sym in list(_prev_rejected):
                     if sym in desired_set and sym in _prev_rejected:
                         logger.info("[%s] market gate cleared → starting worker", sym)
-                        self._emit_market_gate(sym, "market_open")
+                        self._emit_market_gate(sym, "market_open" if sym in entry_set else "custody_forced")
                 _prev_rejected = dict(rejected)
 
                 removed: list[asyncio.Task[None]] = []
@@ -351,13 +373,28 @@ class FastDeskService:
                     task.cancel()
                     removed.append(task)
                     worker_tasks.pop(symbol, None)
+                    mode = worker_modes.pop(symbol, (True, False))
+                    # Temporary custody symbols must not linger in chart RAM after closure.
+                    if mode[1]:
+                        market_state.remove_symbol(symbol)
                     print(f"[fast-desk] worker stopped: {symbol}")
                 if removed:
                     await asyncio.gather(*removed, return_exceptions=True)
 
-                for symbol in desired_symbols:
-                    if symbol in worker_tasks:
+                for symbol in desired_all:
+                    allow_entries = symbol in entry_set
+                    transient_custody_symbol = symbol in transient_symbols
+                    mode = (allow_entries, transient_custody_symbol)
+                    if symbol in worker_tasks and worker_modes.get(symbol) == mode:
                         continue
+                    if symbol in worker_tasks:
+                        # Restart worker when role changes (entry-only vs custody-forced/transient).
+                        task = worker_tasks.pop(symbol)
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                        previous_mode = worker_modes.pop(symbol, (True, False))
+                        if previous_mode[1]:
+                            market_state.remove_symbol(symbol)
                     worker = FastSymbolWorker()
                     worker_tasks[symbol] = asyncio.create_task(
                         worker.run(
@@ -383,9 +420,12 @@ class FastDeskService:
                             custody_config=custody_config,
                             trader_config=trader_config,
                             mt5_call_ref=mt5_call_ref,
+                            allow_entries=allow_entries,
+                            transient_custody_symbol=transient_custody_symbol,
                         ),
                         name=f"fast_desk_worker_{symbol}",
                     )
+                    worker_modes[symbol] = mode
                 await asyncio.sleep(reconcile_sleep)
         except asyncio.CancelledError:
             raise
@@ -394,6 +434,9 @@ class FastDeskService:
                 task.cancel()
             if worker_tasks:
                 await asyncio.gather(*worker_tasks.values(), return_exceptions=True)
+            for symbol, mode in list(worker_modes.items()):
+                if mode[1]:
+                    market_state.remove_symbol(symbol)
 
     @staticmethod
     def _desired_symbols(
@@ -461,6 +504,37 @@ class FastDeskService:
 
             ordered.append(symbol)
         return ordered, rejected
+
+    @staticmethod
+    def _forced_custody_symbols(
+        ownership_open_ref: Callable[[], list[dict[str, Any]]] | None,
+    ) -> list[str]:
+        if ownership_open_ref is None:
+            return []
+        rows = ownership_open_ref()
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            owner = str(row.get("desk_owner", "")).strip().lower()
+            status = str(row.get("ownership_status", "")).strip().lower()
+            if owner != "fast" and status not in {"fast_owned", "inherited_fast"}:
+                continue
+
+            symbol = normalize_symbol(str(row.get("symbol", "")))
+            if not symbol:
+                metadata = row.get("metadata")
+                if isinstance(metadata, str):
+                    with contextlib.suppress(Exception):
+                        metadata = json.loads(metadata)
+                if isinstance(metadata, dict):
+                    symbol = normalize_symbol(str(metadata.get("symbol", "")))
+            if not symbol or symbol in seen or not is_operable_symbol(symbol):
+                continue
+            ordered.append(symbol)
+            seen.add(symbol)
+        return ordered
 
 
 def create_fast_desk_service(db_path: Path) -> FastDeskService:

@@ -538,39 +538,52 @@ class FastTraderService:
         # keep managing it regardless of the original desk_owner field.
         smc_pos_ids: set[int] = set()
         smc_order_ids: set[int] = set()
+        inherited_pos_ids: set[int] = set()
         grace_pos_ids: set[int] = set()
         grace_order_ids: set[int] = set()
         now_utc = datetime.now(timezone.utc)
+        now_ts = time.time()
         if ownership_open_ref is not None:
             for row in ownership_open_ref():
                 if not isinstance(row, dict):
                     continue
                 owner = str(row.get("desk_owner", "")).lower()
                 status = str(row.get("ownership_status", "")).lower()
+                pos_id = int(row.get("position_id", 0) or row.get("mt5_position_id", 0) or 0)
+                ord_id = int(row.get("order_id", 0) or row.get("mt5_order_id", 0) or 0)
                 # Exclude only if owned by another desk AND not adopted by fast
                 if owner in {"smc"} and "fast" not in status:
-                    pos_id = int(row.get("position_id", 0) or row.get("mt5_position_id", 0) or 0)
-                    ord_id = int(row.get("order_id", 0) or row.get("mt5_order_id", 0) or 0)
                     if pos_id > 0:
                         smc_pos_ids.add(pos_id)
                     if ord_id > 0:
                         smc_order_ids.add(ord_id)
                     continue
+                if owner == "fast" and status == "inherited_fast" and pos_id > 0:
+                    inherited_pos_ids.add(pos_id)
+                    # Track first-seen inherited timestamp per runtime process so
+                    # restarts still get a stabilization window even when DB
+                    # adopted_at is from an older session.
+                    state.inherited_first_seen_at.setdefault(pos_id, now_ts)
                 # Grace period for recently adopted/inherited positions
                 if status == "inherited_fast" and self.trader_config.adoption_grace_seconds > 0:
+                    grace_active = False
                     adopted_at_raw = str(row.get("adopted_at", "") or "").strip()
                     if adopted_at_raw:
                         try:
                             adopted_dt = datetime.fromisoformat(adopted_at_raw.replace("Z", "+00:00"))
-                            if (now_utc - adopted_dt).total_seconds() < self.trader_config.adoption_grace_seconds:
-                                pos_id = int(row.get("position_id", 0) or row.get("mt5_position_id", 0) or 0)
-                                ord_id = int(row.get("order_id", 0) or row.get("mt5_order_id", 0) or 0)
-                                if pos_id > 0:
-                                    grace_pos_ids.add(pos_id)
-                                if ord_id > 0:
-                                    grace_order_ids.add(ord_id)
+                            grace_active = (
+                                (now_utc - adopted_dt).total_seconds() < self.trader_config.adoption_grace_seconds
+                            )
                         except (ValueError, TypeError):
-                            pass
+                            grace_active = False
+                    if not grace_active and pos_id > 0:
+                        first_seen = float(state.inherited_first_seen_at.get(pos_id, now_ts) or now_ts)
+                        grace_active = (now_ts - first_seen) < self.trader_config.adoption_grace_seconds
+                    if grace_active:
+                        if pos_id > 0:
+                            grace_pos_ids.add(pos_id)
+                        if ord_id > 0:
+                            grace_order_ids.add(ord_id)
 
         # Tick price for pending manager — prefer pre-fetched; connector fallback for tests
         current_price = 0.0
@@ -592,15 +605,64 @@ class FastTraderService:
 
         managed_positions = 0
         managed_orders = 0
+        active_symbol_pos_ids: set[int] = set()
 
         for position in positions:
             if str(position.get("symbol", "")).upper() != symbol.upper():
                 continue
             position_id = int(position.get("position_id", 0) or 0)
+            if position_id > 0:
+                active_symbol_pos_ids.add(position_id)
             if position_id in smc_pos_ids:  # belongs to SMC desk — do not touch
                 continue
-            if position_id in grace_pos_ids:  # recently adopted — observe before managing
-                continue
+
+            # Inherited operations must receive immediate baseline protection before
+            # regular custody decisions (which may otherwise return "hold").
+            if position_id in inherited_pos_ids:
+                current_sl = float(position.get("stop_loss", position.get("sl", 0.0)) or 0.0)
+                current_tp = float(position.get("take_profit", position.get("tp", 0.0)) or 0.0)
+                needs_initial_protection = current_sl <= 0 or current_tp <= 0
+                if needs_initial_protection and position_id not in state.adopted_protection_attempted:
+                    protection = self._build_initial_inherited_protection(
+                        position=position,
+                        candles_m5=candles_m5,
+                        pip_size=float(pip_size),
+                        point_size=float(point_size),
+                        symbol_spec=symbol_spec,
+                    )
+                    if protection is not None:
+                        if risk_action_ref is not None:
+                            risk_action = risk_action_ref("modify_position_levels")
+                            if not bool(risk_action.get("allowed", False)):
+                                protection = None
+                        if protection is not None:
+                            result = self.execution.modify_position_levels(
+                                connector,
+                                symbol=symbol,
+                                position_id=position_id,
+                                stop_loss=protection["stop_loss"],
+                                take_profit=protection["take_profit"],
+                                mt5_execute_sync=mt5_execute_sync,
+                            )
+                            state.adopted_protection_attempted.add(position_id)
+                            managed_positions += 1
+                            self._log_event(
+                                db_path=db_path,
+                                broker_server=broker_server,
+                                account_login=account_login,
+                                symbol=symbol,
+                                action="adopted_initial_protection",
+                                position_id=position_id,
+                                details={
+                                    "reason": "inherited_missing_levels",
+                                    "requested": protection,
+                                    "result": result,
+                                },
+                            )
+                # During grace window, inherited positions are custody-protected
+                # but not eligible for aggressive actions (close/reduce/trailing).
+                if position_id in grace_pos_ids:
+                    continue
 
             decision = self.custody_engine.evaluate_position(
                 position=position,
@@ -691,7 +753,57 @@ class FastTraderService:
                     details={"order_id": order_id, "reason": pending_decision.reason, "result": result},
                 )
 
+        # Cleanup stale per-position runtime memory.
+        for stale_pos_id in list(state.inherited_first_seen_at):
+            if stale_pos_id not in active_symbol_pos_ids:
+                state.inherited_first_seen_at.pop(stale_pos_id, None)
+                state.adopted_protection_attempted.discard(stale_pos_id)
+
         return {"positions": managed_positions, "orders": managed_orders}
+
+    def _build_initial_inherited_protection(
+        self,
+        *,
+        position: dict[str, Any],
+        candles_m5: list[dict[str, Any]],
+        pip_size: float,
+        point_size: float,
+        symbol_spec: dict[str, Any],
+    ) -> dict[str, float] | None:
+        side = str(position.get("side", "")).lower()
+        if side not in {"buy", "sell"}:
+            return None
+
+        open_price = float(position.get("price_open", 0.0) or 0.0)
+        current_price = float(position.get("price_current", open_price) or open_price)
+        if open_price <= 0 or current_price <= 0 or pip_size <= 0:
+            return None
+
+        atr = max(self.custody_engine._atr(candles_m5, 14), pip_size * 10)
+        risk_pips = max((atr / pip_size) * 1.2, 12.0)
+        risk_distance = risk_pips * pip_size
+
+        min_points = int(symbol_spec.get("trade_stops_level", symbol_spec.get("stops_level_points", 0)) or 0)
+        min_dist = max(min_points * point_size, pip_size * 2)
+
+        if side == "buy":
+            sl = open_price - risk_distance
+            sl = min(sl, current_price - min_dist)
+            tp = open_price + (risk_distance * 2.0)
+            tp = max(tp, current_price + min_dist)
+        else:
+            sl = open_price + risk_distance
+            sl = max(sl, current_price + min_dist)
+            tp = open_price - (risk_distance * 2.0)
+            tp = min(tp, current_price - min_dist)
+
+        if sl <= 0 or tp <= 0:
+            return None
+        if side == "buy" and sl >= current_price:
+            return None
+        if side == "sell" and sl <= current_price:
+            return None
+        return {"stop_loss": float(sl), "take_profit": float(tp)}
 
     @staticmethod
     def _fast_owned_sets(ownership_rows: list[dict[str, Any]]) -> tuple[set[int], set[int]]:

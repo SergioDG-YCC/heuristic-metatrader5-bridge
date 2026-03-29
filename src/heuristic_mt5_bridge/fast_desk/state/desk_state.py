@@ -14,6 +14,8 @@ class SymbolDeskState:
     positions_closed_today: int = 0
     scaled_out_position_ids: set[int] = field(default_factory=set)
     touched_pending_orders: set[int] = field(default_factory=set)
+    adopted_protection_attempted: set[int] = field(default_factory=set)
+    inherited_first_seen_at: dict[int, float] = field(default_factory=dict)
 
 
 class FastDeskState:
