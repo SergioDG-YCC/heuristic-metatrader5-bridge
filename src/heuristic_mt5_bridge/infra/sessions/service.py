@@ -76,6 +76,15 @@ class _SessionRequestHandler(socketserver.BaseRequestHandler):
                 return
 
             registry.apply_incoming_sessions(sessions)
+
+            # EA v1.01+ sends broker clock alongside sessions
+            if "gmt_offset" in payload:
+                try:
+                    gmt_offset = int(payload["gmt_offset"])
+                    server_time = int(payload.get("server_time", 0))
+                    registry.set_broker_clock(server_time=server_time, gmt_offset=gmt_offset)
+                except (TypeError, ValueError):
+                    pass
             generation = str(uuid.uuid4())[:8]
             _send_framed(conn, {"action": "ack", "generation": generation})
             service._mark_pull(generation=generation)  # noqa: SLF001

@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -7,6 +8,8 @@ from heuristic_mt5_bridge.smc_desk.detection.liquidity import detect_liquidity_p
 from heuristic_mt5_bridge.smc_desk.detection.order_blocks import detect_order_blocks
 from heuristic_mt5_bridge.smc_desk.detection.structure import detect_market_structure
 
+
+logger = logging.getLogger("fast_desk.setup")
 
 DEFAULT_EFFECTIVE_MIN_RR = 3.0
 
@@ -58,27 +61,37 @@ class FastSetupEngine:
         *,
         symbol: str,
         candles_m5: list[dict[str, Any]],
-        candles_h1: list[dict[str, Any]],
+        candles_htf: list[dict[str, Any]] | None = None,
         pip_size: float,
         h1_bias: str,
         spread_pips: float = 0.0,
+        # Backward compat alias
+        candles_h1: list[dict[str, Any]] | None = None,
     ) -> list[FastSetup]:
-        if len(candles_m5) < 40 or len(candles_h1) < 20 or pip_size <= 0:
+        htf = candles_htf if candles_htf is not None else (candles_h1 or [])
+        if len(candles_m5) < 40 or len(htf) < 40 or pip_size <= 0:
+            logger.debug(
+                "detect_setups early exit: m5=%d htf=%d pip_size=%s",
+                len(candles_m5), len(htf), pip_size,
+            )
             return []
 
         cfg = self.config
-        atr = max(self._atr(candles_m5, 14), pip_size * 8)
+        atr = self._atr(candles_m5, 14)
+        if atr <= 0:
+            logger.debug("detect_setups: ATR <= 0 for %s, skipping", symbol)
+            return []
         latest_close = float(candles_m5[-1].get("close", 0.0) or 0.0)
         if latest_close <= 0:
             return []
 
         structure_m5 = detect_market_structure(candles_m5[-180:], window=3)
-        structure_h1 = detect_market_structure(candles_h1[-200:], window=3)
+        structure_htf = detect_market_structure(htf[-200:], window=3)
 
-        # Premium/Discount zone boundary from H1 impulse
-        impulse_high = float(structure_h1.get("last_impulse_high") or 0.0)
-        impulse_low = float(structure_h1.get("last_impulse_low") or 0.0)
-        pd_mid = float(structure_h1.get("premium_discount_level") or 0.0)
+        # Premium/Discount zone boundary from HTF impulse
+        impulse_high = float(structure_htf.get("last_impulse_high") or 0.0)
+        impulse_low = float(structure_htf.get("last_impulse_low") or 0.0)
+        pd_mid = float(structure_htf.get("premium_discount_level") or 0.0)
         if pd_mid <= 0 and impulse_high > 0 and impulse_low > 0:
             pd_mid = (impulse_high + impulse_low) / 2.0
 
@@ -98,8 +111,8 @@ class FastSetupEngine:
             self._liquidity_sweep_reclaim(
                 symbol=symbol,
                 candles_m5=candles_m5,
-                candles_h1=candles_h1,
-                structure_h1=structure_h1,
+                candles_htf=htf,
+                structure_htf=structure_htf,
                 latest_close=latest_close,
                 atr=atr,
                 pip_size=pip_size,
@@ -131,16 +144,26 @@ class FastSetupEngine:
 
         filtered = [setup for setup in setups if setup.confidence >= cfg.min_confidence and setup.risk_pips > 0]
 
-        # Premium/Discount zone filter: buy in discount, sell in premium
+        logger.debug(
+            "detect_setups %s: raw=%d after_conf_filter=%d pd_mid=%.5f",
+            symbol, len(setups), len(filtered), pd_mid,
+        )
+
+        # Phase 4: Premium/Discount zone filter is SOFT — penalize confidence instead of discarding
         if pd_mid > 0:
-            pd_filtered: list[FastSetup] = []
             for s in filtered:
                 if s.side == "buy" and s.entry_price > pd_mid:
-                    continue  # buying in premium zone — skip
+                    s.confidence = round(s.confidence * 0.7, 4)
                 if s.side == "sell" and s.entry_price < pd_mid:
-                    continue  # selling in discount zone — skip
-                pd_filtered.append(s)
-            filtered = pd_filtered
+                    s.confidence = round(s.confidence * 0.7, 4)
+
+        # Phase 4: Bias alignment penalty (soft, not blocking)
+        for s in filtered:
+            if h1_bias in {"buy", "sell"} and s.side != h1_bias:
+                s.confidence = round(s.confidence * 0.75, 4)
+
+        # Re-apply min_confidence after all penalties
+        filtered = [s for s in filtered if s.confidence >= cfg.min_confidence]
 
         # Apply spread buffer to SL and recalculate effective RR
         if spread_pips > 0 and pip_size > 0:
@@ -180,6 +203,10 @@ class FastSetupEngine:
                 if (abs(s.take_profit - s.entry_price) / abs(s.entry_price - s.stop_loss) if abs(s.entry_price - s.stop_loss) > 0 else 0.0) >= cfg.min_rr
             ]
         filtered.sort(key=lambda item: item.confidence, reverse=True)
+        logger.debug(
+            "detect_setups %s: final_count=%d types=%s",
+            symbol, len(filtered), [s.setup_type for s in filtered],
+        )
         return filtered
 
     def _order_block_retest(
@@ -267,14 +294,14 @@ class FastSetupEngine:
         *,
         symbol: str,
         candles_m5: list[dict[str, Any]],
-        candles_h1: list[dict[str, Any]],
-        structure_h1: dict[str, Any],
+        candles_htf: list[dict[str, Any]],
+        structure_htf: dict[str, Any],
         latest_close: float,
         atr: float,
         pip_size: float,
         rr: float,
     ) -> list[FastSetup]:
-        liquidity = detect_liquidity_pools(candles_h1[-140:], candles_m5[-180:], structure=structure_h1, max_zones=10)
+        liquidity = detect_liquidity_pools(candles_htf[-140:], candles_m5[-180:], structure=structure_htf, max_zones=10)
         sweeps = detect_sweeps(candles_m5[-180:], liquidity, lookback=60)
         if not sweeps:
             return []

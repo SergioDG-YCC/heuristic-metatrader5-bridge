@@ -90,13 +90,14 @@ Eso se ve incluso en la WebUI `FastPipeline.tsx`, donde el pipeline tiene 8 etap
 
 Componentes principales:
 
-- `context/service.py`: bias H1, sesion, spread, slippage, stale/regime gates.
+- `context/service.py`: bias M30, sesion, spread, slippage, stale/regime gates. Hard gates (`stale_feed`, `symbol_closed`, `session_blocked`, `spread_too_wide`, `slippage`, `no_trade_regime`) bloquean inmediatamente; soft gates aplican penalizacion de confianza.
 - `setup/engine.py`: setups M5.
 - `trigger/engine.py`: trigger en M1, obligatorio antes de ejecutar.
 - `pending/manager.py`: vida de pendientes.
 - `custody/engine.py`: break-even, trailing, hard cut, no passive underwater.
 - `trader/service.py`: orquestador de la mesa fast.
 - `workers/symbol_worker.py`: un worker por simbolo.
+- `runtime.py`: orquestador de ciclo de vida de workers con market-gate (solo crea workers para mercados abiertos segun horarios del EA + reloj de sistema).
 
 Idea operativa:
 

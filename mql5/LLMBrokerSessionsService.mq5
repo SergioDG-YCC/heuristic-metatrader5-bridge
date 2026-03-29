@@ -267,7 +267,12 @@ string FetchAllSessions(const string &symbols[])
       json += "}";   // close symbol
    }
 
-   json += "}}";
+   json += "},";
+
+   //--- Server clock data (added once, outside per-symbol loop)
+   json += "\"server_time\":" + IntegerToString((long)TimeTradeServer())
+         + ",\"gmt_offset\":"  + IntegerToString((int)TimeGMTOffset())
+         + "}";
    return json;
 }
 

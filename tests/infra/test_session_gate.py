@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 from heuristic_mt5_bridge.infra.sessions.gate import evaluate_symbol_session_gate, is_trade_open_from_registry
 
 
 class SessionGateTest(unittest.TestCase):
-    def test_is_trade_open_from_registry_respects_server_offset(self) -> None:
+    def test_is_trade_open_from_registry_respects_broker_gmt_offset(self) -> None:
         now_utc = datetime(2026, 3, 23, 10, 0, 0, tzinfo=timezone.utc)
         session_groups = {
             "sig_1": {
@@ -23,14 +24,16 @@ class SessionGateTest(unittest.TestCase):
                 session_groups,
                 symbol_to_group,
                 "EURUSD",
-                server_time_offset_seconds=7200,
+                broker_gmt_offset=7200,
                 now_utc=now_utc,
             )
         )
 
-    def test_evaluate_symbol_session_gate_requires_sessions_and_required_feeds(self) -> None:
+    @patch("heuristic_mt5_bridge.infra.sessions.gate.registry")
+    def test_evaluate_symbol_session_gate_requires_sessions_and_required_feeds(self, mock_registry) -> None:
+        mock_registry.get_broker_gmt_offset.return_value = 0
+
         payload = {
-            "server_time_offset_seconds": 7200,
             "feed_status": [
                 {"symbol": "EURUSD", "timeframe": "M5", "feed_status": "live"},
                 {"symbol": "EURUSD", "timeframe": "H1", "feed_status": "idle"},

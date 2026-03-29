@@ -299,6 +299,22 @@ class MT5Connector:
             "swap_short": float(getattr(info, "swap_short", 0.0) or 0.0),
         }
 
+    def fetch_available_symbol_count(self) -> int:
+        """Get the total count of symbols without downloading the full catalog.
+        
+        Returns the count of all financial instruments in MetaTrader 5 (including
+        custom and disabled ones in MarketWatch). Useful for quick validation
+        if catalog has changed without full MT5 API round-trip.
+        
+        Returns 0 on error.
+        """
+        try:
+            mt5 = self._require_mt5()
+            count = mt5.symbols_total() or 0
+            return int(count)
+        except Exception:
+            return 0
+
     def fetch_available_symbol_catalog(self) -> list[dict[str, Any]]:
         mt5 = self._require_mt5()
         symbols = mt5.symbols_get() or ()

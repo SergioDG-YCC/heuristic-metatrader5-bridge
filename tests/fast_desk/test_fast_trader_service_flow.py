@@ -58,7 +58,7 @@ class _MarketState:
     def __init__(self) -> None:
         self._m1 = _candles(260, minutes=1)
         self._m5 = _candles(260, minutes=5)
-        self._h1 = _candles(260, minutes=60)
+        self._m30 = _candles(260, minutes=30)
 
     def get_candles(self, symbol: str, timeframe: str, bars: int) -> list[dict[str, Any]]:
         _ = symbol
@@ -68,7 +68,7 @@ class _MarketState:
             return list(self._m1)
         if tf == "M5":
             return list(self._m5)
-        return list(self._h1)
+        return list(self._m30)
 
 
 class _SpecRegistry:

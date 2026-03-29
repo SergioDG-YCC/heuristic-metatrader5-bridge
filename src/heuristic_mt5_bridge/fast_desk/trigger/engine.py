@@ -1,10 +1,14 @@
 ﻿from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 from heuristic_mt5_bridge.fast_desk.setup.engine import FastSetup
 from heuristic_mt5_bridge.smc_desk.detection.structure import detect_market_structure
+
+
+logger = logging.getLogger("fast_desk.trigger")
 
 
 @dataclass
@@ -21,15 +25,32 @@ class FastTriggerDecision:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+_STRONG_TRIGGERS = frozenset({"micro_bos", "displacement", "reclaim"})
+
+
 class FastTriggerEngine:
     """Confirm M5 setup with deterministic M1 trigger conditions."""
 
     def __init__(self, config: FastTriggerConfig | None = None) -> None:
         self.config = config or FastTriggerConfig()
 
-    def confirm(self, *, setup: FastSetup, candles_m1: list[dict[str, Any]], pip_size: float) -> FastTriggerDecision:
+    def confirm(
+        self,
+        *,
+        setup: FastSetup,
+        candles_m1: list[dict[str, Any]],
+        pip_size: float,
+        context: Any | None = None,
+    ) -> FastTriggerDecision:
         if len(candles_m1) < 18 or pip_size <= 0:
             return FastTriggerDecision(False, "none", 0.0, "insufficient_m1_data")
+
+        # Phase 5: context-based pre-filter
+        if context is not None:
+            vol_regime = str(getattr(context, "volatility_regime", ""))
+            if vol_regime == "very_low":
+                logger.debug("trigger rejected: very_low volatility regime")
+                return FastTriggerDecision(False, "none", 0.0, "volatility_too_low")
 
         checks: list[FastTriggerDecision] = []
         checks.append(self._micro_bos(setup, candles_m1))
@@ -41,8 +62,24 @@ class FastTriggerEngine:
         valid = [item for item in checks if item.confirmed]
         if not valid:
             return FastTriggerDecision(False, "none", 0.0, "m1_trigger_missing")
+
+        # Phase 5: trigger stacking — require ≥2 confirmations, or 1 strong + displacement
+        strong = [t for t in valid if t.trigger_type in _STRONG_TRIGGERS]
+        if len(valid) < 2 and not strong:
+            logger.debug("trigger rejected: only weak triggers (%s)", [t.trigger_type for t in valid])
+            return FastTriggerDecision(False, "none", 0.0, "weak_trigger_only")
+
         valid.sort(key=lambda item: item.confidence, reverse=True)
-        return valid[0]
+        best = valid[0]
+
+        # Phase 5: exhaustion risk requires higher trigger confidence
+        if context is not None:
+            exhaustion = str(getattr(context, "exhaustion_risk", "low"))
+            if exhaustion == "high" and best.confidence < 0.82:
+                logger.debug("trigger rejected: exhaustion=high confidence=%.2f", best.confidence)
+                return FastTriggerDecision(False, best.trigger_type, best.confidence, "exhaustion_high_weak_trigger")
+
+        return best
 
     @staticmethod
     def _micro_bos(setup: FastSetup, candles: list[dict[str, Any]]) -> FastTriggerDecision:

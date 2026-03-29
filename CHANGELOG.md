@@ -11,6 +11,77 @@ Versioning follows [SemVer](https://semver.org/).
 ### Added
 - `TRADERS_GUIDE.es.md` — new trader-friendly documentation in Spanish, focused on explaining the system architecture, market desks, risk management, and WebUI panels in accessible language. Complements the technical `README.es.md` and serves as onboarding guide for traders of all experience levels.
 
+---
+
+## [0.3.4] — 2026-03-28
+
+### Added — Broker clock from EA + 6-phase Fast Desk refactoring
+
+#### Broker clock architecture (EA → Python)
+
+- **`LLMBrokerSessionsService.mq5`**: EA now sends `TimeTradeServer()` and `TimeGMTOffset()` in every session payload. Two new JSON fields: `server_time` (epoch int) and `gmt_offset` (seconds int).
+- **`registry.py`**: New `set_broker_clock()`, `get_broker_gmt_offset()`, `is_broker_clock_available()` functions store and expose the EA-reported GMT offset.
+- **`gate.py`**: `is_trade_open_from_registry()` now uses `broker_gmt_offset` (from EA) instead of tick-derived offset. Session schedule comparison uses system clock UTC + EA GMT offset.
+- **`service.py` (sessions)**: Extracts `server_time`/`gmt_offset` from EA payload on every pull cycle, calls `registry.set_broker_clock()`.
+- **`/status` endpoint**: Exposes `broker_gmt_offset` and `broker_clock_available` fields.
+- **Market gate endpoint**: `GET /api/v1/fast/market-gates` returns per-symbol gate state.
+
+#### Time architecture clarification
+
+- **Authoritative clock**: system UTC + EA-reported `TimeGMTOffset()` + broker session schedules from EA.
+- **Tick-based offset** (`estimate_server_time_offset`): demoted to informative-only (candle latency). Not used for market gate decisions.
+- **Removed**: ±12h sanitization workaround in `set_server_time_offset()` — no longer needed, offset is purely informative.
+
+#### 6-phase Fast Desk analysis refactoring
+
+Complete overhaul of the Fast Desk analysis pipeline per Senior Quant spec:
+
+**Phase 0 — H1 → M30 normalization**
+- HTF bias candles changed from H1 to M30 across `FastContextService`, `FastSetupEngine`, and `FastTraderService`.
+- `candles_h1` parameter renamed to `candles_htf` with backward compatibility.
+- Default watch timeframes: `M1,M5,M30,H1,H4,D1` (H1 preserved for SMC Desk).
+
+**Phase 1 — Hard/soft gate split**
+- `_HARD_GATES` frozenset: `stale_feed`, `symbol_closed`, `session_blocked`, `spread_too_wide`, `slippage`, `no_trade_regime`.
+- Hard gates return immediately with 0.0 confidence. Soft gates apply a multiplier penalty.
+- `session_blocked` promoted from soft to hard gate.
+
+**Phase 2 — ATR-aware EMA overextension**
+- EMA overextension threshold now uses `max(2.0%, 0.5 × ATR/price × 100)` instead of fixed 2%.
+- Adapts to volatile instruments (BTCUSD, XAUUSD) vs tight forex pairs.
+
+**Phase 3 — M5-only market phase detection**
+- Market phase (`trending`/`ranging`/`compression`/`breakout`) now computed from M5 candles only.
+- Removed H1 dependency for phase detection.
+
+**Phase 4 — Setup engine fixes**
+- ATR floor for SL removed (was rejecting valid setups on volatile instruments).
+- Premium/Discount filter softened to ×0.7 confidence multiplier (was hard block).
+- Bias alignment filter softened to ×0.75 multiplier (was hard block).
+
+**Phase 5 — Trigger engine fixes**
+- Optional `context` parameter for future context-aware triggers.
+- `very_low` volatility rejection in trigger.
+- Trigger stacking: requires ≥2 triggers or 1 strong trigger.
+- Exhaustion confidence gate.
+
+**Phase 6 — Debug logging**
+- Comprehensive debug logging across trader service pipeline.
+- Activity log throttled to 60s for noisy hard gates (`stale_feed`, `symbol_closed`, `session_blocked`).
+- Pipeline traces suppressed for noisy hard-gated symbols in SSE.
+
+#### SSE improvements
+
+- SSE heartbeat changed from `data: {"traces": [], ...}` to SSE comment `": heartbeat\n\n"` when there are no traces.
+- Eliminates noise in WebUI from empty trace payloads.
+
+#### Worker market-gate integration
+
+- `FastDeskService._desired_symbols()` now checks `is_trade_open_from_registry()` before spawning workers.
+- Workers only created for symbols with open broker trade sessions.
+- Market gate events emitted to activity_log ring buffer with state change tracking.
+- `FastDeskService.get_market_gates()` class method for WebUI/API consumption.
+
 ### Changed
 - Fast Desk RR is now governed by a single operator-facing value: `FAST_TRADER_RR_RATIO`.
 - Fast Desk runtime/setup config no longer expose a second independent RR floor on the public config surface.
@@ -21,6 +92,8 @@ Versioning follows [SemVer](https://semver.org/).
 - Fast risk engine now clamps `risk_pct` to the documented 2% cap.
 - Fast risk engine accepts legacy `pip_value` callers for backward compatibility while preserving the MT5 `symbol_spec` path.
 - Fast Desk test suite debt around `calculate_lot_size()` compatibility is now green again.
+- Weekend/holiday bug: `server_time_offset = -86400` from stale Friday ticks no longer corrupts market gate (offset removed from gate logic).
+- Forex symbols no longer appear as pipeline noise when markets are closed.
 
 ### Planned
 - `GET /smc/thesis/{symbol}` — latest SMC thesis per symbol

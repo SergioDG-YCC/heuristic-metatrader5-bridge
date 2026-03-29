@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from . import registry
+
 
 USABLE_FEED_STATUSES = {"live", "idle", "market_closed"}
 
@@ -12,7 +14,7 @@ def is_trade_open_from_registry(
     symbol_to_group: dict[str, Any],
     symbol: str,
     *,
-    server_time_offset_seconds: int = 0,
+    broker_gmt_offset: int = 0,
     now_utc: datetime | None = None,
 ) -> bool:
     signature = symbol_to_group.get(str(symbol).upper())
@@ -28,7 +30,7 @@ def is_trade_open_from_registry(
     current_utc = now_utc or datetime.now(timezone.utc)
     python_weekday = current_utc.weekday()
     mt5_day = (python_weekday + 1) % 7
-    seconds = current_utc.hour * 3600 + current_utc.minute * 60 + current_utc.second + int(server_time_offset_seconds)
+    seconds = current_utc.hour * 3600 + current_utc.minute * 60 + current_utc.second + int(broker_gmt_offset)
     if seconds >= 86400:
         seconds -= 86400
         mt5_day = (mt5_day + 1) % 7
@@ -90,7 +92,7 @@ def evaluate_symbol_session_gate(
 
     session_known = False
     trade_open_now = False
-    server_time_offset = int(market_state_payload.get("server_time_offset_seconds", 0) or 0)
+    gmt_offset = registry.get_broker_gmt_offset()
     broker_registry = market_state_payload.get("broker_session_registry")
     if isinstance(broker_registry, dict):
         symbol_to_group = broker_registry.get("symbol_to_session_group") or {}
@@ -101,7 +103,7 @@ def evaluate_symbol_session_gate(
                 session_groups,
                 symbol_to_group,
                 normalized_symbol,
-                server_time_offset_seconds=server_time_offset,
+                broker_gmt_offset=gmt_offset,
                 now_utc=now_utc,
             )
 

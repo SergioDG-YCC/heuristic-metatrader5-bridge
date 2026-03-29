@@ -1,4 +1,4 @@
-import { createSignal, onMount, onCleanup, For, Show } from "solid-js";
+import { createSignal, createMemo, onMount, onCleanup, For, Show } from "solid-js";
 import type { Component } from "solid-js";
 import { api } from "../api/client";
 import type {
@@ -104,15 +104,22 @@ const FastPipeline: Component = () => {
   const [selected, setSelected] = createSignal<string | null>(null);
   const [cursor, setCursor] = createSignal(0);
   const [connected, setConnected] = createSignal(false);
+  const [catalogEntries, setCatalogEntries] = createSignal<any[]>([]);
 
   let sseSource: EventSource | null = null;
 
   // Initial REST load
   onMount(async () => {
     try {
-      const snap = await api.fastPipeline(MAX_TRACES);
+      const [snap, catalogRes] = await Promise.all([
+        api.fastPipeline(MAX_TRACES),
+        api.catalog(),
+      ]);
       setTraces(snap.traces);
       setCursor(snap.cursor);
+      if (catalogRes?.symbols) {
+        setCatalogEntries(catalogRes.symbols);
+      }
     } catch {
       // will retry via SSE
     }
@@ -173,6 +180,49 @@ const FastPipeline: Component = () => {
     }
     return [...map.values()];
   };
+
+  // Group traces by asset class (similar to SMC)
+  interface TraceGroup {
+    assetClass: string;
+    traces: PipelineTrace[];
+  }
+
+  const groupedTraces = createMemo(() => {
+    const groups = new Map<string, PipelineTrace[]>();
+    const catalogMap = new Map<string, any>();
+    
+    // Build catalog map
+    for (const entry of catalogEntries()) {
+      if (entry.symbol) {
+        catalogMap.set(entry.symbol, entry);
+      }
+    }
+
+    // Get latest per symbol and group by asset class
+    const latest = latestPerSymbol();
+    for (const trace of latest) {
+      const catalogEntry = catalogMap.get(trace.symbol);
+      const assetClass = catalogEntry?.asset_class ?? "(unknown)";
+      if (!groups.has(assetClass)) {
+        groups.set(assetClass, []);
+      }
+      groups.get(assetClass)!.push(trace);
+    }
+
+    // Sort each group alphabetically by symbol and return sorted groups
+    const result: TraceGroup[] = [];
+    const sortedKeys = Array.from(groups.keys()).sort();
+    for (const key of sortedKeys) {
+      const groupTraces = groups.get(key)!;
+      // Sort by symbol within each group
+      groupTraces.sort((a, b) => a.symbol.localeCompare(b.symbol));
+      result.push({
+        assetClass: key,
+        traces: groupTraces,
+      });
+    }
+    return result;
+  });
 
   return (
     <div
@@ -315,138 +365,153 @@ const FastPipeline: Component = () => {
                   gap: "3px",
                 }}
               >
-                <For each={latestPerSymbol()}>
-                  {(trace) => {
-                    const status = () => stageStatus(trace, stageName);
-                    const isSelected = () => selected() === trace.trace_id;
-                    const isOtherSelected = () =>
-                      selected() !== null && selected() !== trace.trace_id;
-                    const stageData = () =>
-                      trace.stages.find((s) => s.name === stageName);
-
-                    return (
-                      <div
-                        onClick={() =>
-                          setSelected((prev) =>
-                            prev === trace.trace_id ? null : trace.trace_id
-                          )
-                        }
-                        style={{
-                          position: "relative",
-                          background: isSelected()
-                            ? sideBg(trace)
-                            : "var(--bg-elevated)",
-                          border: isSelected()
-                            ? `1px solid ${sideColor(trace)}`
-                            : "1px solid var(--border-subtle)",
-                          "border-radius": "4px",
-                          padding: "5px 6px",
-                          cursor: "pointer",
-                          opacity: isOtherSelected() ? "0.35" : "1",
-                          transition: "opacity 0.15s, border-color 0.15s",
-                        }}
-                      >
-                        {/* Left color bar */}
-                        <div
-                          style={{
-                            position: "absolute",
-                            left: "0",
-                            top: "0",
-                            bottom: "0",
-                            width: "2px",
-                            background: statusDot(status()),
-                            "border-radius": "4px 0 0 4px",
-                            opacity: "0.85",
-                          }}
-                        />
-                        {/* Symbol + status dot */}
-                        <div
-                          style={{
-                            display: "flex",
-                            "align-items": "center",
-                            gap: "4px",
-                            "margin-bottom": "2px",
-                          }}
-                        >
-                          <span
-                            style={{
-                              width: "5px",
-                              height: "5px",
-                              "border-radius": "50%",
-                              background: statusDot(status()),
-                              "flex-shrink": "0",
-                              "box-shadow": status() === "passed"
-                                ? `0 0 4px ${statusDot(status())}`
-                                : status() === "rejected"
-                                ? `0 0 4px ${statusDot(status())}`
-                                : "none",
-                            }}
-                          />
-                          <span
-                            style={{
-                              "font-family": "var(--font-mono)",
-                              "font-size": "8.5px",
-                              "font-weight": "600",
-                              color: "var(--text-primary)",
-                            }}
-                          >
-                            {trace.symbol}
-                          </span>
-                          <span
-                            style={{
-                              "font-family": "var(--font-mono)",
-                              "font-size": "7px",
-                              "font-weight": "600",
-                              padding: "0 3px",
-                              "border-radius": "2px",
-                              background: sideBg(trace),
-                              color: sideColor(trace),
-                              "margin-left": "auto",
-                            }}
-                          >
-                            {String(
-                              trace.stages.find(
-                                (s) => s.name === "trigger" || s.name === "execution"
-                              )?.details?.side ?? ""
-                            ).toUpperCase() || "—"}
-                          </span>
-                        </div>
-                        {/* Stage detail line */}
-                        <Show when={stageData() && status() !== "pending"}>
-                          <div
-                            style={{
-                              "font-family": "var(--font-mono)",
-                              "font-size": "7px",
-                              color:
-                                status() === "rejected"
-                                  ? "var(--red)"
-                                  : "var(--text-muted)",
-                              "white-space": "nowrap",
-                              overflow: "hidden",
-                              "text-overflow": "ellipsis",
-                              "max-width": "100%",
-                            }}
-                            title={detailLine(stageData()!.details)}
-                          >
-                            {detailLine(stageData()!.details).slice(0, 50) ||
-                              (status() === "passed" ? "✓ passed" : "✗ blocked")}
-                          </div>
-                        </Show>
-                        <Show when={status() === "pending"}>
-                          <div
-                            style={{
-                              "font-family": "var(--font-mono)",
-                              "font-size": "7px",
-                              color: "var(--text-muted)",
-                              opacity: "0.5",
-                            }}
-                          >
-                            — pending
-                          </div>
-                        </Show>
+                <For each={groupedTraces()}>
+                  {(group, groupIdx) => (
+                    <>
+                      {/* Group separator */}
+                      <Show when={groupIdx() > 0}>
+                        <div style={{ margin: "4px 0 2px 0", padding: "2px 0", "border-top": "1px solid var(--border-subtle)" }} />
+                      </Show>
+                      {/* Group header */}
+                      <div style={{ padding: "2px 4px", "font-family": "var(--font-mono)", "font-size": "7px", "font-weight": "600", color: "var(--cyan-live)", "letter-spacing": "0.04em", "text-transform": "uppercase" }}>
+                        {group.assetClass}
                       </div>
-                    );
-                  }}
+                      {/* Traces in group */}
+                      <For each={group.traces}>
+                        {(trace) => {
+                          const status = () => stageStatus(trace, stageName);
+                          const isSelected = () => selected() === trace.trace_id;
+                          const isOtherSelected = () =>
+                            selected() !== null && selected() !== trace.trace_id;
+                          const stageData = () =>
+                            trace.stages.find((s) => s.name === stageName);
+
+                          return (
+                            <div
+                              onClick={() =>
+                                setSelected((prev) =>
+                                  prev === trace.trace_id ? null : trace.trace_id
+                                )
+                              }
+                              style={{
+                                position: "relative",
+                                background: isSelected()
+                                  ? sideBg(trace)
+                                  : "var(--bg-elevated)",
+                                border: isSelected()
+                                  ? `1px solid ${sideColor(trace)}`
+                                  : "1px solid var(--border-subtle)",
+                                "border-radius": "4px",
+                                padding: "5px 6px",
+                                cursor: "pointer",
+                                opacity: isOtherSelected() ? "0.35" : "1",
+                                transition: "opacity 0.15s, border-color 0.15s",
+                              }}
+                            >
+                              {/* Left color bar */}
+                              <div
+                                style={{
+                                  position: "absolute",
+                                  left: "0",
+                                  top: "0",
+                                  bottom: "0",
+                                  width: "2px",
+                                  background: statusDot(status()),
+                                  "border-radius": "4px 0 0 4px",
+                                  opacity: "0.85",
+                                }}
+                              />
+                              {/* Symbol + status dot */}
+                              <div
+                                style={{
+                                  display: "flex",
+                                  "align-items": "center",
+                                  gap: "4px",
+                                  "margin-bottom": "2px",
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    width: "5px",
+                                    height: "5px",
+                                    "border-radius": "50%",
+                                    background: statusDot(status()),
+                                    "flex-shrink": "0",
+                                    "box-shadow": status() === "passed"
+                                      ? `0 0 4px ${statusDot(status())}`
+                                      : status() === "rejected"
+                                      ? `0 0 4px ${statusDot(status())}`
+                                      : "none",
+                                  }}
+                                />
+                                <span
+                                  style={{
+                                    "font-family": "var(--font-mono)",
+                                    "font-size": "8.5px",
+                                    "font-weight": "600",
+                                    color: "var(--text-primary)",
+                                  }}
+                                >
+                                  {trace.symbol}
+                                </span>
+                                <span
+                                  style={{
+                                    "font-family": "var(--font-mono)",
+                                    "font-size": "7px",
+                                    "font-weight": "600",
+                                    padding: "0 3px",
+                                    "border-radius": "2px",
+                                    background: sideBg(trace),
+                                    color: sideColor(trace),
+                                    "margin-left": "auto",
+                                  }}
+                                >
+                                  {String(
+                                    trace.stages.find(
+                                      (s) => s.name === "trigger" || s.name === "execution"
+                                    )?.details?.side ?? ""
+                                  ).toUpperCase() || "—"}
+                                </span>
+                              </div>
+                              {/* Stage detail line */}
+                              <Show when={stageData() && status() !== "pending"}>
+                                <div
+                                  style={{
+                                    "font-family": "var(--font-mono)",
+                                    "font-size": "7px",
+                                    color:
+                                      status() === "rejected"
+                                        ? "var(--red)"
+                                        : "var(--text-muted)",
+                                    "white-space": "nowrap",
+                                    overflow: "hidden",
+                                    "text-overflow": "ellipsis",
+                                    "max-width": "100%",
+                                  }}
+                                  title={detailLine(stageData()!.details)}
+                                >
+                                  {detailLine(stageData()!.details).slice(0, 50) ||
+                                    (status() === "passed" ? "✓ passed" : "✗ blocked")}
+                                </div>
+                              </Show>
+                              <Show when={status() === "pending"}>
+                                <div
+                                  style={{
+                                    "font-family": "var(--font-mono)",
+                                    "font-size": "7px",
+                                    color: "var(--text-muted)",
+                                    opacity: "0.5",
+                                  }}
+                                >
+                                  — pending
+                                </div>
+                              </Show>
+                            </div>
+                          );
+                        }}
+                      </For>
+                    </>
+                  )}
                 </For>
               </div>
             </div>

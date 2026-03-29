@@ -90,8 +90,8 @@ def test_core_setup_liquidity_sweep_reclaim(monkeypatch) -> None:
     out = engine._liquidity_sweep_reclaim(
         symbol="EURUSD",
         candles_m5=_m5_candles(),
-        candles_h1=_m5_candles(40),
-        structure_h1={},
+        candles_htf=_m5_candles(40),
+        structure_htf={},
         latest_close=1.1004,
         atr=0.0009,
         pip_size=0.0001,

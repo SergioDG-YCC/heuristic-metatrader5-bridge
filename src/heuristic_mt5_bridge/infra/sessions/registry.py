@@ -24,6 +24,11 @@ _failed_symbols: set[str] = set()
 
 _server_time_offset_seconds: int = 0
 
+# Authoritative broker clock from EA (TimeTradeServer / TimeGMTOffset)
+_broker_gmt_offset: int = 0
+_broker_server_time: int = 0
+_broker_clock_received: bool = False
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -170,6 +175,7 @@ def get_symbol_session_group(symbol: str) -> str | None:
 
 
 def set_server_time_offset(offset_seconds: int) -> None:
+    """Store tick-based time offset (informative only, candle latency)."""
     global _server_time_offset_seconds
     with _lock:
         _server_time_offset_seconds = int(offset_seconds)
@@ -178,4 +184,24 @@ def set_server_time_offset(offset_seconds: int) -> None:
 def get_server_time_offset() -> int:
     with _lock:
         return _server_time_offset_seconds
+
+
+def set_broker_clock(*, server_time: int, gmt_offset: int) -> None:
+    """Store authoritative broker clock from EA (TimeTradeServer / TimeGMTOffset)."""
+    global _broker_server_time, _broker_gmt_offset, _broker_clock_received
+    with _lock:
+        _broker_server_time = int(server_time)
+        _broker_gmt_offset = int(gmt_offset)
+        _broker_clock_received = True
+
+
+def get_broker_gmt_offset() -> int:
+    """Return EA-reported GMT offset (seconds). 0 if EA hasn't reported yet."""
+    with _lock:
+        return _broker_gmt_offset
+
+
+def is_broker_clock_available() -> bool:
+    with _lock:
+        return _broker_clock_received
 

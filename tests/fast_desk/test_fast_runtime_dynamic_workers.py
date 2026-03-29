@@ -16,7 +16,7 @@ class FastDeskDynamicWorkersTest(unittest.IsolatedAsyncioTestCase):
     async def test_fast_desk_adds_new_worker_when_symbol_supplier_changes(self) -> None:
         service = FastDeskService(
             db_path=Path("runtime.db"),
-            config=FastDeskConfig(scan_interval=0.05, guard_interval=0.05),
+            config=FastDeskConfig(scan_interval=0.05, guard_interval=0.05, allowed_sessions=("global",)),
         )
         active_symbols = ["EURUSD"]
         started: list[str] = []

@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass
@@ -49,6 +50,9 @@ def _execution_slippage_from_spec(symbol_spec: dict[str, Any]) -> int:
         return max(5, int(spread * 3))
 
     return 30  # ultimate fallback for unknown specs
+
+
+logger = logging.getLogger("fast_desk.trader")
 
 
 class FastTraderService:
@@ -132,15 +136,19 @@ class FastTraderService:
 
         candles_m1 = market_state.get_candles(symbol, "M1", 220)
         candles_m5 = market_state.get_candles(symbol, "M5", 220)
-        candles_h1 = market_state.get_candles(symbol, "H1", 220)
-        if len(candles_m1) < 30 or len(candles_m5) < 40 or len(candles_h1) < 20:
+        candles_htf = market_state.get_candles(symbol, "M30", 220)
+        if len(candles_m1) < 30 or len(candles_m5) < 40 or len(candles_htf) < 40:
+            logger.debug(
+                "[%s] insufficient candles: M1=%d M5=%d M30=%d",
+                symbol, len(candles_m1), len(candles_m5), len(candles_htf),
+            )
             return None
 
         context = self.context_service.build_context(
             symbol=symbol,
             candles_m1=candles_m1,
             candles_m5=candles_m5,
-            candles_h1=candles_h1,
+            candles_htf=candles_htf,
             pip_size=float(pip_size),
             point_size=float(point_size),
             connector=connector if prefetched_tick is None else None,
@@ -155,20 +163,41 @@ class FastTraderService:
                 "market_phase": context.market_phase,
                 "exhaustion_risk": context.exhaustion_risk,
                 "warnings": context.warnings,
+                "candle_counts": {"M1": len(candles_m1), "M5": len(candles_m5), "M30": len(candles_htf)},
             }
-            activity_log.emit(symbol, "context", False, _ctx_details)
+            logger.info(
+                "[%s] context BLOCKED: reasons=%s warnings=%s M1=%d M5=%d M30=%d",
+                symbol, context.reasons, context.warnings,
+                len(candles_m1), len(candles_m5), len(candles_htf),
+            )
             _trace.append(PipelineStageResult("context", False, _ctx_details))
-            activity_log.emit_pipeline_trace(symbol, _trace, "context", False)
+            # Throttle activity_log for high-frequency hard gates (stale_feed,
+            # symbol_closed, session_blocked) — emit at most once per 60 s per symbol.
+            _NOISY_GATES = {"stale_feed", "symbol_closed", "session_blocked"}
+            _reason_tags = {r.split(":")[0] for r in context.reasons}
+            _is_noisy = bool(_reason_tags & _NOISY_GATES)
+            if _is_noisy:
+                _now_mono = time.monotonic()
+                _last = getattr(self, "_last_noisy_emit", {})
+                if _now_mono - _last.get(symbol, 0.0) >= 60.0:
+                    activity_log.emit(symbol, "context", False, _ctx_details)
+                    _last[symbol] = _now_mono
+                    self._last_noisy_emit = _last  # type: ignore[attr-defined]
+            else:
+                activity_log.emit(symbol, "context", False, _ctx_details)
+                activity_log.emit_pipeline_trace(symbol, _trace, "context", False)
             return None
         _trace.append(PipelineStageResult("context", True, {
             "session": context.session_name, "h1_bias": context.h1_bias,
             "spread_pips": context.spread_pips, "market_phase": context.market_phase,
+            "warnings": context.warnings,
+            "candle_counts": {"M1": len(candles_m1), "M5": len(candles_m5), "M30": len(candles_htf)},
         }))
 
         setups = self.setup_engine.detect_setups(
             symbol=symbol,
             candles_m5=candles_m5,
-            candles_h1=candles_h1,
+            candles_htf=candles_htf,
             pip_size=float(pip_size),
             h1_bias=context.h1_bias,
             spread_pips=context.spread_pips,
@@ -178,7 +207,17 @@ class FastTraderService:
                 "message": "no_patterns_detected",
                 "market_phase": context.market_phase,
                 "warnings": context.warnings,
+                "candle_counts": {"M1": len(candles_m1), "M5": len(candles_m5), "M30": len(candles_htf)},
+                "h1_bias": context.h1_bias,
+                "volatility_regime": context.volatility_regime,
+                "exhaustion_risk": context.exhaustion_risk,
             }
+            logger.info(
+                "[%s] no_patterns_detected: phase=%s bias=%s vol=%s exh=%s M5=%d M30=%d",
+                symbol, context.market_phase, context.h1_bias,
+                context.volatility_regime, context.exhaustion_risk,
+                len(candles_m5), len(candles_htf),
+            )
             activity_log.emit(symbol, "setup", False, _setup_details)
             _trace.append(PipelineStageResult("setup", False, _setup_details))
             activity_log.emit_pipeline_trace(symbol, _trace, "setup", False)
@@ -265,7 +304,7 @@ class FastTraderService:
             # Exhaustion filter: high exhaustion risk requires higher confidence setups
             if context.exhaustion_risk == "high" and setup.confidence < 0.80:
                 continue
-            trigger = self.trigger_engine.confirm(setup=setup, candles_m1=candles_m1, pip_size=float(pip_size))
+            trigger = self.trigger_engine.confirm(setup=setup, candles_m1=candles_m1, pip_size=float(pip_size), context=context)
             if self._trigger_allowed_for_phase(setup=setup, trigger=trigger, context=context):
                 selected_setup = setup
                 selected_trigger = trigger
@@ -472,15 +511,15 @@ class FastTraderService:
         point_size = float(symbol_spec.get("point", pip_size) or pip_size)
         candles_m1 = market_state.get_candles(symbol, "M1", 220)
         candles_m5 = market_state.get_candles(symbol, "M5", 220)
-        candles_h1 = market_state.get_candles(symbol, "H1", 220)
-        if len(candles_m1) < 20 or len(candles_m5) < 20 or len(candles_h1) < 10:
+        candles_htf = market_state.get_candles(symbol, "M30", 220)
+        if len(candles_m1) < 20 or len(candles_m5) < 20 or len(candles_htf) < 10:
             return {"positions": 0, "orders": 0}
 
         context = self.context_service.build_context(
             symbol=symbol,
             candles_m1=candles_m1,
             candles_m5=candles_m5,
-            candles_h1=candles_h1,
+            candles_htf=candles_htf,
             pip_size=float(pip_size),
             point_size=float(point_size),
             connector=connector if prefetched_tick is None else None,

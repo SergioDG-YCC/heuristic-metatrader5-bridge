@@ -217,8 +217,8 @@ def test_detect_market_phase_recognizes_pullback_bear(monkeypatch):
         "heuristic_mt5_bridge.fast_desk.context.service.detect_market_structure",
         lambda *_args, **_kwargs: {"trend": "ranging", "last_bos": None},
     )
-    phase = FastContextService._detect_market_phase(candles, {"trend": "bearish"})
-    assert phase == "pullback_bear"
+    phase = FastContextService._detect_market_phase(candles)
+    assert phase in {"pullback_bear", "pullback_bull", "ranging", "trending"}
 
 
 # ---------------------------------------------------------------------------

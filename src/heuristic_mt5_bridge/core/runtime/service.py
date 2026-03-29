@@ -24,6 +24,8 @@ from heuristic_mt5_bridge.infra.storage.runtime_db import (
     batch_upsert_market_state_cache,
     batch_upsert_symbol_catalog_cache,
     ensure_runtime_db,
+    get_symbol_catalog_count,
+    load_symbol_catalog_cache,
     load_symbol_desk_assignment_states,
     load_symbol_subscription_states,
     purge_stale_broker_data,
@@ -97,7 +99,7 @@ class CoreRuntimeConfig:
             ),
             terminal_path=getenv("MT5_TERMINAL_PATH", env_values, "").strip(),
             watch_symbols=_csv_values(getenv("MT5_WATCH_SYMBOLS", env_values, "EURUSD"), upper=True),
-            watch_timeframes=_csv_values(getenv("MT5_WATCH_TIMEFRAMES", env_values, "M1,M5,H1"), upper=True),
+            watch_timeframes=_csv_values(getenv("MT5_WATCH_TIMEFRAMES", env_values, "M1,M5,M30,H1"), upper=True),
             poll_seconds=float(getenv("MT5_POLL_SECONDS", env_values, "5")),
             bars_per_pull=int(getenv("MT5_BARS_PER_PULL", env_values, "200")),
             account_mode_guard=getenv("ACCOUNT_MODE", env_values, "demo").strip().lower(),
@@ -377,6 +379,62 @@ class CoreRuntimeService:
             await asyncio.to_thread(batch_upsert_market_state_cache, self.config.runtime_db_path, batch_rows)
         self._next_market_state_checkpoint_at = now_monotonic + max(self.config.market_state_checkpoint_seconds, 1.0)
 
+    async def _refresh_symbol_catalog_with_validation(self) -> None:
+        """Validate symbol catalog count before full refresh.
+        
+        If MT5 symbol count matches cached count, load from DB instead of
+        full refetch. This avoids expensive MT5 API call on every startup
+        when catalog hasn't changed.
+        
+        Falls back to full _refresh_symbol_catalog() if count differs.
+        """
+        broker_server = str(self.broker_identity.get("broker_server", "")).strip()
+        account_login = int(self.broker_identity.get("account_login", 0) or 0)
+        
+        # Fast validation: count only (< 1 sec)
+        mt5_count = await self._mt5_call(self.connector.fetch_available_symbol_count)
+        cached_count = await asyncio.to_thread(
+            get_symbol_catalog_count,
+            self.config.runtime_db_path,
+            broker_server,
+            account_login,
+        )
+        
+        # If count matches, use cached catalog
+        if mt5_count > 0 and mt5_count == cached_count and cached_count > 0:
+            cached_catalog = await asyncio.to_thread(
+                load_symbol_catalog_cache,
+                self.config.runtime_db_path,
+                broker_server,
+                account_login,
+            )
+            if cached_catalog:
+                self.symbol_catalog = cached_catalog
+                self.symbol_catalog_status = {
+                    "status": "cached",
+                    "symbol_count": len(cached_catalog),
+                    "updated_at": utc_now_iso(),
+                    "validation": f"count_match({mt5_count}={cached_count})",
+                }
+                self.health["symbol_catalog"] = "up"
+                # Still need to update catalog universe and subscriptions
+                catalog_universe: list[str] = []
+                seen: set[str] = set()
+                for item in self.symbol_catalog:
+                    symbol = normalize_symbol(str(item.get("symbol", "")))
+                    if not symbol or symbol in seen or not is_operable_symbol(symbol):
+                        continue
+                    catalog_universe.append(symbol)
+                    seen.add(symbol)
+                self.subscription_manager.set_catalog_universe(catalog_universe)
+                self.subscription_manager.reconcile_subscriptions_with_catalog()
+                self.chart_registry.sync_workers(self.subscription_manager.subscribed_universe())
+                self._sync_universe_views()
+                return
+        
+        # Count mismatch or cache miss: full refresh
+        await self._refresh_symbol_catalog()
+
     async def _refresh_symbol_catalog(self) -> None:
         catalog = await self._mt5_call(self.connector.fetch_available_symbol_catalog)
         self.symbol_catalog = [item for item in catalog if isinstance(item, dict)]
@@ -600,10 +658,12 @@ class CoreRuntimeService:
             int(self.broker_identity.get("account_login", 0) or 0),
         )
 
-        await self._refresh_symbol_catalog()
+        await self._refresh_symbol_catalog_with_validation()
         await self._restore_symbol_preferences()
         await self._refresh_symbol_specs()
-        await self._refresh_market_state(force_checkpoint=True)
+        # Load market state to RAM only (do NOT checkpoint to DB in bootstrap)
+        # Charts are loaded for analysis, checkpoint happens later in loop if configured
+        await self._refresh_market_state(force_checkpoint=False)
         await self._refresh_account_state()
         await self._refresh_indicator_state()
 
@@ -953,6 +1013,8 @@ class CoreRuntimeService:
             "health": self.health,
             "broker_identity": self.broker_identity,
             "server_time_offset_seconds": int(getattr(self.connector, "server_time_offset_seconds", 0) or 0),
+            "broker_gmt_offset": session_registry.get_broker_gmt_offset(),
+            "broker_clock_available": session_registry.is_broker_clock_available(),
             "trade_allowed": trade_allowed,  # NEW: Trade permission status
             "universes": {
                 "catalog_universe_count": len(self.catalog_universe),

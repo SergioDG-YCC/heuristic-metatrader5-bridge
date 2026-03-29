@@ -15,7 +15,7 @@ import { runtimeStore } from "../stores/runtimeStore";
 import { operationsStore, initOperationsStore } from "../stores/operationsStore";
 import { fetchChart, getChartEntry } from "../stores/chartsStore";
 import { api } from "../api/client";
-import type { SmcThesis, SmcZone, SmcEventRow, Candle } from "../types/api";
+import type { SmcThesis, SmcZone, SmcEventRow, Candle, CatalogEntry } from "../types/api";
 
 function zoneColor(zt: string): string {
   if (zt.includes("bullish")) return "var(--green)";
@@ -237,6 +237,7 @@ const SmcDesk: Component = () => {
   const [smcConfig, setSmcConfig] = createSignal<any>(null);
   const [deskStatus, setDeskStatus] = createSignal<any>(null);
   const [loading, setLoading] = createSignal(true);
+  const [catalogEntries, setCatalogEntries] = createSignal<CatalogEntry[]>([]);
   const [theses, setTheses] = createSignal<SmcThesis[]>([]);
   const [zones, setZones] = createSignal<SmcZone[]>([]);
   const [smcEvents, setSmcEvents] = createSignal<SmcEventRow[]>([]);
@@ -290,6 +291,40 @@ const SmcDesk: Component = () => {
       counts[symbol] = (counts[symbol] ?? 0) + 1;
     }
     return counts;
+  });
+
+  interface ThesisGroup {
+    assetClass: string;
+    theses: SmcThesis[];
+  }
+
+  const groupedTheses = createMemo(() => {
+    const groups = new Map<string, SmcThesis[]>();
+    const catalogMap = new Map<string, CatalogEntry>();
+    for (const entry of catalogEntries()) {
+      if (entry.symbol) {
+        catalogMap.set(entry.symbol, entry);
+      }
+    }
+
+    for (const t of visibleTheses()) {
+      const catalogEntry = catalogMap.get(t.symbol);
+      const assetClass = catalogEntry?.asset_class ?? "(unknown)";
+      if (!groups.has(assetClass)) {
+        groups.set(assetClass, []);
+      }
+      groups.get(assetClass)!.push(t);
+    }
+
+    const result: ThesisGroup[] = [];
+    const sortedKeys = Array.from(groups.keys()).sort();
+    for (const key of sortedKeys) {
+      result.push({
+        assetClass: key,
+        theses: groups.get(key)!,
+      });
+    }
+    return result;
   });
 
   const chartLegendItems = createMemo(() => [
@@ -585,10 +620,34 @@ const SmcDesk: Component = () => {
     updateLivePriceLines();
   });
 
+  function sortThesesByMarketType(thesesList: SmcThesis[]): SmcThesis[] {
+    const catalogMap = new Map<string, CatalogEntry>();
+    for (const entry of catalogEntries()) {
+      if (entry.symbol) {
+        catalogMap.set(entry.symbol, entry);
+      }
+    }
+
+    return [...thesesList].sort((a, b) => {
+      const aEntry = catalogMap.get(a.symbol);
+      const bEntry = catalogMap.get(b.symbol);
+      const aClass = aEntry?.asset_class ?? "";
+      const bClass = bEntry?.asset_class ?? "";
+
+      // First: sort by asset_class (market type)
+      if (aClass !== bClass) {
+        return aClass.localeCompare(bClass);
+      }
+
+      // Then: sort alphabetically by symbol
+      return (a.symbol ?? "").localeCompare(b.symbol ?? "");
+    });
+  }
+
   async function pollSmcData() {
     try {
       const [tR, zR, eR] = await Promise.all([api.smcTheses(), api.smcZones(), api.smcEvents(60)]);
-      if (tR.status === "success") setTheses(tR.theses);
+      if (tR.status === "success") setTheses(sortThesesByMarketType(tR.theses));
       if (zR.status === "success") setZones(zR.zones);
       if (eR.status === "success") setSmcEvents(eR.events);
     } catch {
@@ -598,12 +657,16 @@ const SmcDesk: Component = () => {
   
   async function loadSmcDeskData() {
     try {
-      const [config, status] = await Promise.all([
+      const [config, status, catalogRes] = await Promise.all([
         api.getSmcConfig(),
         api.deskStatus(),
+        api.catalog(),
       ]);
       setSmcConfig(config.status === "success" ? config.config : null);
       setDeskStatus(status.status === "success" ? status : null);
+      if (catalogRes?.symbols) {
+        setCatalogEntries(catalogRes.symbols);
+      }
     } catch (e) {
       console.error("Failed to fetch SMC Desk data", e);
     } finally {
@@ -713,8 +776,19 @@ const SmcDesk: Component = () => {
                 No theses for current filter.
               </div>
             }>
-              <For each={visibleTheses()}>
-                {(t) => {
+              <For each={groupedTheses()}>
+                {(group, groupIdx) => (
+                  <>
+                    {/* Group separator */}
+                    <Show when={groupIdx() > 0}>
+                      <div style={{ margin: "8px 0 4px 0", padding: "4px 0", "border-top": "1px solid var(--border-subtle)" }} />
+                    </Show>
+                    <div style={{ padding: "4px 6px", "font-family": "var(--font-mono)", "font-size": "9px", "font-weight": "600", color: "var(--cyan-live)", "letter-spacing": "0.05em", "text-transform": "uppercase" }}>
+                      {group.assetClass}
+                    </div>
+                    {/* Theses in group */}
+                    <For each={group.theses}>
+                      {(t) => {
                   const vb = validatorBadge(t.validator_decision);
                   const key = thesisIdentity(t);
                   const isSelected = () => key === selectedThesisId();
@@ -791,8 +865,11 @@ const SmcDesk: Component = () => {
                         </div>
                       </Show>
                     </div>
-                  );
-                }}
+                      );
+                      }}
+                    </For>
+                  </>
+                )}
               </For>
             </Show>
           </div>

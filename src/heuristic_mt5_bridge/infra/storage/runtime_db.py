@@ -908,6 +908,101 @@ def batch_upsert_symbol_catalog_cache(db_path: Path, entries: list[dict[str, Any
         conn.commit()
 
 
+def get_symbol_catalog_count(
+    db_path: Path, broker_server: str, account_login: int
+) -> int:
+    """Get the number of symbols in the cached catalog for this broker/account.
+    
+    Returns 0 if no cache exists. Used to quickly validate if catalog changed
+    without downloading the full list from MT5.
+    """
+    try:
+        with runtime_db_connection(db_path) as conn:
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*) FROM symbol_catalog_cache
+                WHERE broker_server = ? AND account_login = ?
+                """,
+                (broker_server, account_login),
+            )
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
+def load_symbol_catalog_cache(
+    db_path: Path, broker_server: str, account_login: int
+) -> list[dict[str, Any]]:
+    """Load all cached catalog entries for this broker/account.
+    
+    Returns empty list if cache doesn't exist. Used when catalog count validation
+    confirms no change, avoiding full MT5 refetch.
+    """
+    try:
+        with runtime_db_connection(db_path) as conn:
+            cursor = conn.execute(
+                """
+                SELECT
+                    broker_server,
+                    account_login,
+                    symbol,
+                    description,
+                    path,
+                    asset_class,
+                    path_group,
+                    path_subgroup,
+                    visible,
+                    selected,
+                    custom,
+                    trade_mode,
+                    digits,
+                    currency_base,
+                    currency_profit,
+                    currency_margin,
+                    catalog_payload_json
+                FROM symbol_catalog_cache
+                WHERE broker_server = ? AND account_login = ?
+                ORDER BY symbol
+                """,
+                (broker_server, account_login),
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                return []
+            
+            # Reconstruct catalog entries from cached payload
+            entries: list[dict[str, Any]] = []
+            for row in rows:
+                # Try to use full payload if available, fallback to reconstructed
+                payload_json = decode_json_text(row[16], {})
+                if isinstance(payload_json, dict) and payload_json:
+                    entries.append(payload_json)
+                else:
+                    # Reconstruct from individual columns
+                    entries.append({
+                        "broker_server": row[0],
+                        "account_login": row[1],
+                        "symbol": row[2],
+                        "description": row[3],
+                        "path": row[4],
+                        "asset_class": row[5],
+                        "path_group": row[6],
+                        "path_subgroup": row[7],
+                        "visible": bool(row[8]),
+                        "selected": bool(row[9]),
+                        "custom": bool(row[10]),
+                        "trade_mode": row[11],
+                        "digits": row[12],
+                        "currency_base": row[13],
+                        "currency_profit": row[14],
+                        "currency_margin": row[15],
+                    })
+            return entries
+    except Exception:
+        return []
+
+
 def upsert_account_state_cache(db_path: Path, account_state: dict[str, Any]) -> None:
     ensure_runtime_db(db_path)
     with runtime_db_connection(db_path) as conn:

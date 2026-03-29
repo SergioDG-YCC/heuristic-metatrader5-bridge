@@ -6,6 +6,8 @@
 > **Bootstrap conformance audit**: delivered 2026-03-25 — 4 bugs identified and repaired (RiskKernel async, MT5 lock serialization, hot-path disk I/O, sessions default)
 > **Fast Desk analysis audit**: delivered 2026-03-26 — 8 strategic gates added (RR, OB mitigation, premium/discount, market phase, exhaustion, EMA, BOS impulse, directional concentration)
 > **Slippage model**: corrected 2026-03-26 — percentage-based context gate + spec-driven execution slippage (replaces hardcoded point threshold)
+> **Fast Desk 6-phase refactoring**: delivered 2026-03-28 — H1→M30 normalization, hard/soft gate split, ATR-aware EMA, M5-only market phase, setup/trigger engine fixes
+> **Broker clock architecture**: delivered 2026-03-28 — EA sends `TimeTradeServer()`/`TimeGMTOffset()`, gate uses system UTC + EA GMT offset, tick offset demoted to informative
 
 ---
 
@@ -25,9 +27,9 @@ one market-state RAM backbone, and one HTTP control plane.
 
 ## FastTraderService v1 (Immediate Phase)
 
-Fast execution now runs through `FastTraderService` with explicit layered contracts on `M1 + M5 + H1`:
+Fast execution now runs through `FastTraderService` with explicit layered contracts on `M1 + M5 + M30`:
 
-1. `FastContextService` builds H1 bias and hard gates (`session`, `spread`, `slippage`, `stale_feed`, regime, `market_phase`, `exhaustion_risk`, `ema_overextended`).
+1. `FastContextService` builds M30 bias and hard gates (`session`, `spread`, `slippage`, `stale_feed`, `session_blocked`, regime, `market_phase`, `exhaustion_risk`, `ema_overextended`).
 2. `FastSetupEngine` detects M5 setups (`3 core + 4 patterns`) with structural filters:
    - **Spread-aware SL**: widens SL by live spread distance before RR calculation.
    - **Minimum RR gate**: rejects setups with effective RR < `FAST_TRADER_MIN_RR` (default 2.0).
@@ -42,17 +44,18 @@ Fast execution now runs through `FastTraderService` with explicit layered contra
 8. Custody scope is restricted to `fast_owned` and `inherited_fast`; no intervention over SMC-owned operations.
 9. Runtime integration uses `RiskKernel` and `OwnershipRegistry` as authorities through `CoreRuntimeService` hooks.
 
-### Context gates (v0.3.1)
+### Context gates (v0.3.4)
 
 | Gate | Type | Logic |
 |------|------|-------|
 | Session | hard | Only trade during configured sessions (default: London, overlap, NY) |
+| Session blocked | hard | Broker trade session closed (from EA schedule + system UTC + EA GMT offset) |
 | Spread | hard | Percentage-based per asset class (forex/crypto/metals/indices), 3 tolerance levels |
 | Slippage | hard | `abs(tick - last_M1_close) / tick_price × 100 > max_slippage_pct` — universal, no symbol-specific hardcoding |
 | Stale feed | hard | Block if last M1 candle is older than `stale_feed_seconds` |
 | Market phase | hard | `m5_ranging` blocks trading — detected from M5 structure contraction |
-| EMA overextension | hard | Price > 2% from EMA20 on H1 → chasing, blocked |
-| Volatility regime | hard | `very_low` H1 volatility → `no_trade_regime` |
+| EMA overextension | hard | Price > `max(2%, 0.5×ATR/price×100)` from EMA20 on M30 → chasing, blocked (ATR-adaptive) |
+| Volatility regime | hard | `very_low` M30 volatility → `no_trade_regime` |
 | Exhaustion risk | soft | `high` exhaustion + setup confidence < 0.80 → skip setup (not a hard context block) |
 
 ### Execution slippage (spec-driven)
@@ -585,7 +588,7 @@ MT5 terminal(s)
 | Feed status (tick age, bar age) | `ChartWorker[symbol]` | Volatile, meaningless as persisted value |
 | Indicator enrichment (applied) | `MarketStateService` | Applied to chart in RAM, no disk copy |
 | Symbol specs (typed) | `SymbolSpecRegistry` | Loaded at startup, accessed every signal cycle |
-| Broker session windows | `BrokerSessionsService.registry` | Live state, refreshed by MQL5 EA |
+| Broker session windows | `BrokerSessionsService.registry` | Live state, refreshed by MQL5 EA every 60s. Includes `TimeTradeServer()`/`TimeGMTOffset()` for authoritative broker clock. |
 | Chart context (built view) | `MarketStateService` | Derived on demand from RAM candles |
 
 ### What is allowed in SQLite (operational persistence only)
@@ -619,7 +622,7 @@ MT5 terminal(s)
 - maintain `SubscriptionManager` (catalog / bootstrap / subscribed universes)
 - keep chart state in RAM via `ChartWorker` + `MarketStateService`
 - normalize all timestamps to UTC0 before storage
-- maintain broker session awareness via `BrokerSessionsService`
+- maintain broker session awareness via `BrokerSessionsService` (trade/quote windows + GMT offset from EA)
 - enrich indicators into RAM via `IndicatorBridge` (file-in, RAM-out)
 - persist operationally necessary data to SQLite (partitioned by broker/account)
 - expose account / positions / orders

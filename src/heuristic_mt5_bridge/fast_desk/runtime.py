@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from heuristic_mt5_bridge.core.runtime.market_state import MarketStateService
+from heuristic_mt5_bridge.core.runtime.market_state import MarketStateService, session_name_from_timestamp
 from heuristic_mt5_bridge.core.runtime.spec_registry import SymbolSpecRegistry
 from heuristic_mt5_bridge.fast_desk.context import FastContextConfig
 from heuristic_mt5_bridge.fast_desk.context.service import DEFAULT_SPREAD_THRESHOLDS
@@ -18,7 +20,11 @@ from heuristic_mt5_bridge.fast_desk.signals.scanner import FastScannerConfig
 from heuristic_mt5_bridge.fast_desk.trader import FastTraderConfig
 from heuristic_mt5_bridge.fast_desk.trigger import FastTriggerConfig
 from heuristic_mt5_bridge.fast_desk.workers.symbol_worker import FastSymbolWorker, FastWorkerConfig
+from heuristic_mt5_bridge.infra.sessions import registry as session_registry
+from heuristic_mt5_bridge.infra.sessions.gate import is_trade_open_from_registry
 from heuristic_mt5_bridge.shared.symbols.universe import is_operable_symbol, normalize_symbol
+
+logger = logging.getLogger("fast_desk.runtime")
 
 
 def _getenv_float(name: str, default: float) -> float:
@@ -214,6 +220,30 @@ class FastDeskService:
             self._trader_config.require_h1_alignment = cfg.require_h1_alignment
             self._trader_config.adoption_grace_seconds = cfg.adoption_grace_seconds
 
+    # ------------------------------------------------------------------
+    # Market-gate event emitter (consumed by activity_log ring buffer)
+    # ------------------------------------------------------------------
+    _market_gate_ring: dict[str, dict[str, Any]] = {}  # symbol → last gate event
+
+    @classmethod
+    def _emit_market_gate(cls, symbol: str, reason: str) -> None:
+        """Record a market-gate state change for *symbol*.
+
+        Stored in a class-level dict so WebUI / SMC / any consumer can query
+        ``FastDeskService.get_market_gates()`` without coupling to a specific
+        instance.  The dict is intentionally small (one entry per symbol).
+        """
+        cls._market_gate_ring[symbol.upper()] = {
+            "symbol": symbol.upper(),
+            "gate": reason,
+            "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        }
+
+    @classmethod
+    def get_market_gates(cls) -> dict[str, dict[str, Any]]:
+        """Return current market-gate state per symbol (snapshot)."""
+        return dict(cls._market_gate_ring)
+
     async def run_forever(
         self,
         market_state: MarketStateService,
@@ -285,16 +315,34 @@ class FastDeskService:
         self._trader_config = trader_config
 
         print(
-            f"[fast-desk] starting - broker={broker_server} account={account_login} tf=M1,M5,H1"
+            f"[fast-desk] starting - broker={broker_server} account={account_login} tf=M1,M5,M30"
         )
 
         worker_tasks: dict[str, asyncio.Task[None]] = {}
         reconcile_sleep = max(0.5, min(cfg.scan_interval, cfg.guard_interval, 2.0))
+        # Track previous rejected reasons to only log/emit on state changes
+        _prev_rejected: dict[str, str] = {}
 
         try:
             while True:
-                desired_symbols = self._desired_symbols(subscribed_symbols_ref)
+                desired_symbols, rejected = self._desired_symbols(
+                    subscribed_symbols_ref,
+                    allowed_sessions=cfg.allowed_sessions,
+                )
                 desired_set = set(desired_symbols)
+
+                # --- Emit market state changes for rejected symbols ---
+                for sym, reason in rejected.items():
+                    prev = _prev_rejected.get(sym)
+                    if prev != reason:
+                        logger.info("[%s] worker NOT started: %s", sym, reason)
+                        self._emit_market_gate(sym, reason)
+                # Symbols that were rejected but are now desired → log recovery
+                for sym in list(_prev_rejected):
+                    if sym in desired_set and sym in _prev_rejected:
+                        logger.info("[%s] market gate cleared → starting worker", sym)
+                        self._emit_market_gate(sym, "market_open")
+                _prev_rejected = dict(rejected)
 
                 removed: list[asyncio.Task[None]] = []
                 for symbol, task in list(worker_tasks.items()):
@@ -348,17 +396,71 @@ class FastDeskService:
                 await asyncio.gather(*worker_tasks.values(), return_exceptions=True)
 
     @staticmethod
-    def _desired_symbols(subscribed_symbols_ref: Callable[[], list[str]] | None) -> list[str]:
+    def _desired_symbols(
+        subscribed_symbols_ref: Callable[[], list[str]] | None,
+        allowed_sessions: tuple[str, ...] = ("london", "overlap", "new_york"),
+    ) -> tuple[list[str], dict[str, str]]:
+        """Return (operable_symbols, rejected_reasons).
+
+        *rejected_reasons* maps symbol → reason string for every subscribed
+        symbol that was excluded.  Reasons:
+        - ``"market_closed"`` – broker trade session is closed (from EA schedule)
+        - ``"session_not_enabled"`` – current trading session (tokyo/london/…) is
+          not in the configured ``allowed_sessions``
+        - ``"no_session_data"`` – broker sessions EA has not reported schedule yet
+        """
         raw_symbols = subscribed_symbols_ref() if subscribed_symbols_ref is not None else []
+
+        # Snapshot from the broker-sessions registry (thread-safe copy)
+        reg = session_registry.get_session_registry()
+        session_groups = reg.get("session_groups", {})
+        symbol_to_group = reg.get("symbol_to_session_group", {})
+        gmt_offset = session_registry.get_broker_gmt_offset()
+
+        # Current trading session name
+        now = datetime.now(timezone.utc)
+        current_session = session_name_from_timestamp(now)
+        session_enabled = (
+            "global" in allowed_sessions
+            or "all_markets" in allowed_sessions
+            or current_session in allowed_sessions
+        )
+
         ordered: list[str] = []
+        rejected: dict[str, str] = {}
         seen: set[str] = set()
+
         for raw in raw_symbols:
             symbol = normalize_symbol(raw)
             if not symbol or symbol in seen or not is_operable_symbol(symbol):
                 continue
-            ordered.append(symbol)
             seen.add(symbol)
-        return ordered
+
+            # 1) Check broker trade-session schedule (from EA)
+            if symbol.upper() in symbol_to_group:
+                trade_open = is_trade_open_from_registry(
+                    session_groups, symbol_to_group, symbol,
+                    broker_gmt_offset=gmt_offset, now_utc=now,
+                )
+                if not trade_open:
+                    rejected[symbol] = "market_closed"
+                    continue
+            else:
+                # EA hasn't reported schedule yet — allow (fail-open) but log
+                if session_groups:
+                    # Registry has data for other symbols, just not this one
+                    rejected[symbol] = "no_session_data"
+                    continue
+                # Registry completely empty (EA not connected yet) → fail-open
+                pass
+
+            # 2) Check configured session filter (London/NY/etc)
+            if not session_enabled:
+                rejected[symbol] = "session_not_enabled"
+                continue
+
+            ordered.append(symbol)
+        return ordered, rejected
 
 
 def create_fast_desk_service(db_path: Path) -> FastDeskService:

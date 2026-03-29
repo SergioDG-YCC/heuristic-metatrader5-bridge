@@ -66,10 +66,24 @@ class FastContext:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+# Hard gates block execution unconditionally.
+_HARD_GATES = frozenset({
+    "symbol_closed", "stale_feed", "slippage_exceeded", "spread_exceeded",
+    "session_blocked",
+})
+
+
+def _reason_is_hard(reason: str) -> bool:
+    """Return True if *reason* matches any hard-gate prefix."""
+    tag = reason.split(":")[0]
+    return tag in _HARD_GATES
+
+
 class FastContextService:
     """Build deterministic trading context for FastTraderService.
 
     Context is evaluated once per scan cycle and reused by setup/trigger/execution.
+    HTF = M30 (higher timeframe for directional bias).
     """
 
     def __init__(self, config: FastContextConfig | None = None) -> None:
@@ -81,13 +95,17 @@ class FastContextService:
         symbol: str,
         candles_m1: list[dict[str, Any]],
         candles_m5: list[dict[str, Any]],
-        candles_h1: list[dict[str, Any]],
+        candles_htf: list[dict[str, Any]] | None = None,
         pip_size: float,
         point_size: float,
         connector: Any | None = None,
         prefetched_tick: dict[str, Any] | None = None,
         symbol_spec: dict[str, Any] | None = None,
+        # Backward compat alias — callers using the old name still work.
+        candles_h1: list[dict[str, Any]] | None = None,
     ) -> FastContext:
+        # Resolve HTF candles: prefer explicit candles_htf, fall back to legacy candles_h1
+        htf = candles_htf if candles_htf is not None else (candles_h1 or [])
         cfg = self.config
         reasons: list[str] = []
         warnings: list[str] = []
@@ -104,26 +122,26 @@ class FastContextService:
             if session_name not in set(cfg.allowed_sessions):
                 reasons.append(f"session_blocked:{session_name}")
 
-        # H1 directional bias
-        h1_structure = detect_market_structure(candles_h1[-160:], window=3) if len(candles_h1) >= 20 else {}
-        trend = str(h1_structure.get("trend", "ranging"))
-        h1_bias = "neutral"
+        # HTF (M30) directional bias
+        htf_structure = detect_market_structure(htf[-160:], window=3) if len(htf) >= 20 else {}
+        trend = str(htf_structure.get("trend", "ranging"))
+        htf_bias = "neutral"
         if trend == "bullish":
-            h1_bias = "buy"
+            htf_bias = "buy"
         elif trend == "bearish":
-            h1_bias = "sell"
+            htf_bias = "sell"
 
         # Volatility regime from M5 range/body ratio
         volatility_regime = self._volatility_regime(candles_m5)
 
-        # Market phase from M5 structure: trending / ranging / compression / breakout
-        market_phase = self._detect_market_phase(candles_m5, h1_structure)
+        # Market phase from M5 structure ONLY (Phase 3: no HTF dependency)
+        market_phase = self._detect_market_phase(candles_m5)
 
-        # Exhaustion risk: detect late-trend signals from H1
-        exhaustion_risk = self._detect_exhaustion(candles_m5, h1_structure)
+        # Exhaustion risk: detect late-trend signals from M5 body weakening
+        exhaustion_risk = self._detect_exhaustion(candles_m5, htf_structure)
 
-        # EMA alignment and overextension check on H1
-        ema_alignment, overextended = self._ema_check(candles_h1)
+        # EMA alignment and overextension check on HTF (M30), ATR-aware threshold
+        ema_alignment, overextended, ema_distance_atr = self._ema_check(htf)
 
         # Spread + expected slippage estimation
         # Priority: pre-fetched tick (lock-safe, from async path) > connector fallback (legacy/tests)
@@ -179,29 +197,26 @@ class FastContextService:
         if stale_feed:
             reasons.append("stale_feed")
 
-        # No-trade regime: only extreme low-volatility blocks — H1 neutral is context
-        # (used upstream in trader/service.py for setup filtering), never a hard gate.
+        # ------- SOFT context (informational, never blocks) -------
         no_trade_regime = volatility_regime == "very_low"
         if no_trade_regime:
-            reasons.append("no_trade_regime")
+            warnings.append("no_trade_regime")
 
-        # M5 ranging is useful context, but by itself it should not kill the symbol.
-        # Selection becomes stricter downstream in trader/service.py.
         if market_phase == "ranging":
             warnings.append("m5_ranging")
         elif market_phase in {"pullback_bull", "pullback_bear"}:
             warnings.append(market_phase)
 
-        # Overextension gate: price too far from EMA20 → chasing
         if overextended:
-            reasons.append("ema_overextended")
+            warnings.append("ema_overextended")
 
-        allowed = not reasons
+        # Phase 1: only HARD gates block execution
+        allowed = not any(_reason_is_hard(r) for r in reasons)
 
         return FastContext(
             symbol=symbol,
             session_name=session_name,
-            h1_bias=h1_bias,
+            h1_bias=htf_bias,
             volatility_regime=volatility_regime,
             spread_pips=round(spread_pips, 4),
             expected_slippage_points=round(expected_slippage_points, 4),
@@ -213,12 +228,13 @@ class FastContextService:
             reasons=reasons,
             warnings=warnings,
             details={
-                "h1_trend": trend,
+                "htf_trend": trend,
                 "m1_bars": len(candles_m1),
                 "m5_bars": len(candles_m5),
-                "h1_bars": len(candles_h1),
+                "htf_bars": len(htf),
                 "ema_alignment": ema_alignment,
                 "overextended": overextended,
+                "ema_distance_atr": round(ema_distance_atr, 4),
                 "context_warnings": list(warnings),
             },
         )
@@ -269,16 +285,17 @@ class FastContextService:
         return age > float(max(5, stale_seconds))
 
     @staticmethod
-    def _detect_market_phase(candles_m5: list[dict[str, Any]], h1_structure: dict[str, Any]) -> str:
-        """Classify M5 market phase: trending, ranging, compression, breakout.
+    def _detect_market_phase(candles_m5: list[dict[str, Any]]) -> str:
+        """Classify M5 market phase using ONLY M5 data (Phase 3: no HTF dependency).
 
-        Uses M5 swing range contraction and H1 BOS/CHoCH to classify.
+        Returns: trending, ranging, compression, breakout, pullback_bull, pullback_bear.
         """
         if len(candles_m5) < 30:
             return "unknown"
 
-        # Check for recent BOS on M5 (breakout)
+        # M5 structure
         m5_struct = detect_market_structure(candles_m5[-80:], window=2)
+        m5_trend = str(m5_struct.get("trend", "ranging"))
         last_bos = m5_struct.get("last_bos") if isinstance(m5_struct.get("last_bos"), dict) else None
 
         # Range detection: compare first-half range to second-half range on M5
@@ -322,27 +339,24 @@ class FastContextService:
             if bos_idx >= len(candles_m5[-80:]) - 10:
                 return "breakout"
 
-        # Ranging: H1 trend is "ranging" AND M5 shows no strong directional progress
-        h1_trend = str(h1_structure.get("trend", "ranging"))
-        m5_trend = str(m5_struct.get("trend", "ranging"))
+        # M5-only ranging / pullback classification
         if m5_trend == "ranging":
-            if h1_trend == "bullish":
-                if recent_delta > 0 and directional_progress >= 0.35:
-                    return "trending"
-                if recent_delta < 0 and directional_progress >= 0.25:
-                    return "pullback_bull"
-            elif h1_trend == "bearish":
-                if recent_delta < 0 and directional_progress >= 0.35:
-                    return "trending"
-                if recent_delta > 0 and directional_progress >= 0.25:
+            if recent_delta > 0 and directional_progress >= 0.35:
+                return "trending"
+            if recent_delta < 0 and directional_progress >= 0.35:
+                return "trending"
+            # Detect pullbacks purely from M5 delta direction vs trend
+            if m5_trend == "ranging" and directional_progress >= 0.25:
+                if recent_delta < 0:
                     return "pullback_bear"
-        if h1_trend == "ranging" and m5_trend == "ranging":
+                if recent_delta > 0:
+                    return "pullback_bull"
             return "ranging"
-        if m5_trend == "ranging":
-            return "ranging"
-        if h1_trend == "bullish" and recent_delta < 0 and directional_progress >= 0.30:
+
+        # Trending M5 with counter-delta = pullback
+        if m5_trend == "bullish" and recent_delta < 0 and directional_progress >= 0.30:
             return "pullback_bull"
-        if h1_trend == "bearish" and recent_delta > 0 and directional_progress >= 0.30:
+        if m5_trend == "bearish" and recent_delta > 0 and directional_progress >= 0.30:
             return "pullback_bear"
 
         return "trending"
@@ -388,20 +402,21 @@ class FastContextService:
         return "low"
 
     @staticmethod
-    def _ema_check(candles_h1: list[dict[str, Any]]) -> tuple[str, bool]:
-        """Compute EMA20/EMA50 alignment and overextension on H1.
+    def _ema_check(candles_htf: list[dict[str, Any]], *, overext_k: float = 1.2) -> tuple[str, bool, float]:
+        """Compute EMA20/EMA50 alignment and ATR-aware overextension on HTF (M30).
 
-        Returns (alignment, overextended):
+        Returns (alignment, overextended, ema_distance_atr):
          - alignment: "bullish" | "bearish" | "neutral"
-         - overextended: True if price > 2% from EMA20
+         - overextended: True if |price - EMA20| > ATR_HTF * k
+         - ema_distance_atr: ratio of distance-to-EMA20 / ATR (for diagnostics)
         """
-        if len(candles_h1) < 50:
-            return "neutral", False
+        if len(candles_htf) < 50:
+            return "neutral", False, 0.0
 
-        closes = [float(c.get("close", 0.0) or 0.0) for c in candles_h1[-60:]]
+        closes = [float(c.get("close", 0.0) or 0.0) for c in candles_htf[-60:]]
         closes = [c for c in closes if c > 0]
         if len(closes) < 50:
-            return "neutral", False
+            return "neutral", False, 0.0
 
         def _ema(data: list[float], period: int) -> float:
             if len(data) < period:
@@ -423,11 +438,26 @@ class FastContextService:
         else:
             alignment = "neutral"
 
-        # Overextension: price > 2% from EMA20
+        # Phase 2: ATR-aware overextension (replaces fixed 2% threshold)
+        ema_distance_atr = 0.0
+        overextended = False
         if ema20 > 0:
-            distance_pct = abs(price - ema20) / ema20 * 100.0
-            overextended = distance_pct > 2.0
-        else:
-            overextended = False
+            distance = abs(price - ema20)
+            # Compute ATR on the same HTF candles
+            atr_htf = 0.0
+            trs: list[float] = []
+            slice_htf = candles_htf[-60:]
+            for idx in range(1, len(slice_htf)):
+                h = float(slice_htf[idx].get("high", 0.0) or 0.0)
+                lo = float(slice_htf[idx].get("low", 0.0) or 0.0)
+                pc = float(slice_htf[idx - 1].get("close", 0.0) or 0.0)
+                if h > 0 and lo > 0 and pc > 0:
+                    trs.append(max(h - lo, abs(h - pc), abs(lo - pc)))
+            if trs:
+                window = trs[-14:] if len(trs) >= 14 else trs
+                atr_htf = sum(window) / len(window)
+            if atr_htf > 0:
+                ema_distance_atr = distance / atr_htf
+                overextended = distance > atr_htf * overext_k
 
-        return alignment, overextended
+        return alignment, overextended, ema_distance_atr

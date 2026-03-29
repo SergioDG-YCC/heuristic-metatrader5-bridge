@@ -21,7 +21,7 @@ Optional desks auto-attach via env vars — no code changes required.
   broker   : FBS-Demo (FBS-Demo)
   account  : 105845678  10000.0 USD
   symbols  : BTCUSD, EURUSD, GBPUSD, USDJPY, USDCHF
-  tf       : M5, H1, H4, D1
+  tf       : M1, M5, M30, H1, H4, D1
   smc_desk : disabled
   db       : storage/live/runtime.db
   endpoint : http://0.0.0.0:8765
@@ -185,6 +185,7 @@ FastAPI server. The **only** external interface to runtime state.
 | `POST /unsubscribe` | Remove symbol from subscribed universe |
 | `GET /api/v1/symbols/desk-assignments` | Per-symbol desk assignment map (`{symbol: ["fast","smc"]}`) |
 | `PUT /api/v1/symbols/{symbol}/desks` | Set which desks process a symbol (`{"desks": ["fast","smc"]}`) |
+| `GET /api/v1/fast/market-gates` | Per-symbol market gate state (open/closed/no_session_data) |
 | `GET /events?interval=1.0` | SSE stream of live state at given interval |
 | `GET /ownership` | Full ownership list (`active + historical`) + summary counters |
 | `GET /ownership/open` | Active ownership rows only |
@@ -207,7 +208,7 @@ MT5_BROKER_SERVER=FBS-Demo
 MT5_ACCOUNT_LOGIN=105845678
 MT5_ACCOUNT_PASSWORD=your_password
 MT5_WATCH_SYMBOLS=EURUSD,GBPUSD,XAUUSD
-MT5_WATCH_TIMEFRAMES=M1,M5,H1,H4,D1
+MT5_WATCH_TIMEFRAMES=M1,M5,M30,H1,H4,D1
 MT5_POLL_SECONDS=5
 CORE_ACCOUNT_REFRESH_SECONDS=2
 RUNTIME_DB_PATH=storage/live/runtime.db
@@ -250,6 +251,9 @@ FAST_TRADER_ENABLE_STRUCTURAL_TRAILING=true
 FAST_TRADER_ENABLE_ATR_TRAILING=true
 FAST_TRADER_ENABLE_SCALE_OUT=false
 FAST_TRADER_PENDING_TTL_SECONDS=900
+FAST_TRADER_ALLOWED_SESSIONS=london,overlap,new_york
+FAST_TRADER_SPREAD_TOLERANCE=medium
+FAST_TRADER_MIN_RR=3.0
 
 # --- Ownership + Risk Kernel ---
 RISK_PROFILE_GLOBAL=2

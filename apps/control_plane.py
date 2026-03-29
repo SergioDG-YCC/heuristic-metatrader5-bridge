@@ -1244,6 +1244,17 @@ async def desk_status() -> dict[str, Any]:
 # Fast Desk — Activity & Signal Endpoints
 # ---------------------------------------------------------------------------
 
+@app.get("/api/v1/fast/market-gates")
+async def fast_market_gates() -> dict[str, Any]:
+    """Current market-gate state per symbol (market_closed / session_not_enabled / market_open)."""
+    from heuristic_mt5_bridge.fast_desk.runtime import FastDeskService
+    return {
+        "status": "success",
+        "gates": FastDeskService.get_market_gates(),
+        "updated_at": utc_now_iso(),
+    }
+
+
 @app.get("/api/v1/fast/activity")
 async def fast_activity(limit: int = 50) -> dict[str, Any]:
     """Ring-buffer activity feed — shows which gate blocked each scan cycle."""
@@ -1346,8 +1357,12 @@ async def _pipeline_sse_generator(interval: float = 1.0):
     try:
         while True:
             traces, cursor = activity_log.pipeline_traces_since(cursor, limit=50)
-            payload = json.dumps({"traces": traces, "cursor": cursor})
-            yield f"data: {payload}\n\n"
+            if traces:
+                payload = json.dumps({"traces": traces, "cursor": cursor})
+                yield f"data: {payload}\n\n"
+            else:
+                # SSE comment keeps connection alive without polluting client
+                yield ": heartbeat\n\n"
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
         pass
@@ -1545,7 +1560,24 @@ def main() -> int:
     host = getenv("CONTROL_PLANE_HOST", env_values, "0.0.0.0").strip() or "0.0.0.0"
     port = int(getenv("CONTROL_PLANE_PORT", env_values, "8765"))
     print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] starting uvicorn on {host}:{port}", flush=True)
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+
+    config = uvicorn.Config(
+        app, host=host, port=port, log_level="warning",
+        timeout_graceful_shutdown=3,
+    )
+    server = uvicorn.Server(config)
+
+    # On Windows, signal handlers don't work inside asyncio event loops.
+    # We install a native handler that asks uvicorn to shut down cleanly.
+    import signal
+
+    def _force_shutdown(sig: int, frame: Any) -> None:
+        server.should_exit = True
+
+    signal.signal(signal.SIGINT, _force_shutdown)
+    signal.signal(signal.SIGTERM, _force_shutdown)
+
+    server.run()
     return 0
 
 
