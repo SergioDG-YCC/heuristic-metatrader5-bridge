@@ -6,6 +6,7 @@ const Settings: Component = () => {
   const [llmModels, setLlmModels] = createSignal<any[]>([]);
   const [llmStatus, setLlmStatus] = createSignal<any>(null);
   const [smcConfig, setSmcConfig] = createSignal<any>(null);
+  const [smcTraderConfig, setSmcTraderConfig] = createSignal<any>(null);
   const [fastConfig, setFastConfig] = createSignal<any>(null);
   const [ownershipConfig, setOwnershipConfig] = createSignal<any>(null);
   const [riskConfig, setRiskConfig] = createSignal<any>(null);
@@ -29,6 +30,7 @@ const Settings: Component = () => {
       api.getLlmModels(),
       api.getLlmStatus(),
       api.getSmcConfig(),
+      api.getSmcTraderConfig(),
       api.getFastConfig(),
       api.getOwnershipConfig(),
       api.getRiskConfig(),
@@ -37,7 +39,7 @@ const Settings: Component = () => {
 
     console.log("[Settings] Promise.allSettled results:", results);
 
-    const [llmModelsRes, llmStatusRes, smc, fast, ownership, risk, deskSt] = results.map(r =>
+    const [llmModelsRes, llmStatusRes, smc, smcTrader, fast, ownership, risk, deskSt] = results.map(r =>
       r.status === "fulfilled" ? r.value : null
     );
 
@@ -45,6 +47,7 @@ const Settings: Component = () => {
       llmModels: llmModelsRes?.status,
       llmStatus: llmStatusRes?.status,
       smc: smc?.status,
+      smcTrader: smcTrader?.status,
       fast: fast?.status,
       ownership: ownership?.status,
       risk: risk?.status,
@@ -64,6 +67,10 @@ const Settings: Component = () => {
       setSmcConfig((smc as any).config);
     } else {
       console.warn("[Settings] SMC config failed:", smc);
+    }
+    if (smcTrader?.status === "success" && "config" in smcTrader) {
+      console.log("[Settings] Setting SMC Trader config:", smcTrader.config);
+      setSmcTraderConfig((smcTrader as any).config);
     }
     if (fast?.status === "success" && "config" in fast) {
       console.log("[Settings] Setting Fast config:", fast.config);
@@ -90,7 +97,7 @@ const Settings: Component = () => {
     
     if (failedIndexes.length > 0) {
       const failedNames = failedIndexes.map(i => {
-        const names = ["LLM Models", "LLM Status", "SMC Config", "Fast Config", "Ownership Config", "Risk Config"];
+        const names = ["LLM Models", "LLM Status", "SMC Config", "SMC Trader Config", "Fast Config", "Ownership Config", "Risk Config"];
         return names[i];
       }).join(", ");
       setError(`Failed to load ${failedIndexes.length} config(s): ${failedNames}. Retrying...`);
@@ -121,6 +128,9 @@ const Settings: Component = () => {
           break;
         case "smc_enabled":
           result = await api.setSmcDeskEnabled(data.enabled);
+          break;
+        case "smc_trader":
+          result = await api.updateSmcTraderConfig(data);
           break;
         case "fast":
           result = await api.updateFastConfig(data);
@@ -380,6 +390,133 @@ const Settings: Component = () => {
               </div>
             </Show>
           </Show>
+
+          {/* --- SMC Trader Configuration --- */}
+          <div style={{ "border-top": "1px solid var(--border-default)", "margin-top": "15px", "padding-top": "15px" }}>
+            <div style={{ "font-size": "11px", "font-weight": "600", color: "var(--text-primary)", "margin-bottom": "10px" }}>
+              SMC Trader (Pending Orders & Custody)
+            </div>
+
+            <Show when={smcTraderConfig()} fallback={<div style={{ "font-size": "9px", color: "var(--text-muted)" }}>Loading SMC Trader config…</div>}>
+              <div class="form-group" style={{ "margin-bottom": "15px" }}>
+                <label style={{ display: "flex", "align-items": "center", gap: "8px", "font-size": "11px", color: "var(--text-secondary)" }}>
+                  <input
+                    type="checkbox"
+                    checked={smcTraderConfig()?.enabled ?? false}
+                    onChange={(e) => saveConfig("smc_trader", { enabled: e.currentTarget.checked })}
+                    disabled={saving() === "smc_trader"}
+                  />
+                  Trader Enabled
+                </label>
+                <div style={{ "font-size": "9px", color: "var(--text-muted)", "margin-top": "4px" }}>
+                  Enables thesis-driven pending order placement and position custody.
+                </div>
+              </div>
+
+              <div class="form-group" style={{ "margin-bottom": "15px" }}>
+                <label style={{ display: "block", "margin-bottom": "5px", "font-size": "11px", color: "var(--text-secondary)" }}>
+                  Max Positions per Symbol: {smcTraderConfig()?.max_positions_per_symbol ?? "—"}
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="5"
+                  value={smcTraderConfig()?.max_positions_per_symbol || 1}
+                  onChange={(e) => saveConfig("smc_trader", { max_positions_per_symbol: Number(e.currentTarget.value) })}
+                  style={{ width: "100%", padding: "8px", background: "var(--bg-base)", border: "1px solid var(--border-default)", color: "var(--text-primary)", "border-radius": "4px" }}
+                  disabled={saving() === "smc_trader"}
+                />
+              </div>
+
+              <div class="form-group" style={{ "margin-bottom": "15px" }}>
+                <label style={{ display: "block", "margin-bottom": "5px", "font-size": "11px", color: "var(--text-secondary)" }}>
+                  Max Positions Total: {smcTraderConfig()?.max_positions_total ?? "—"}
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="20"
+                  value={smcTraderConfig()?.max_positions_total || 5}
+                  onChange={(e) => saveConfig("smc_trader", { max_positions_total: Number(e.currentTarget.value) })}
+                  style={{ width: "100%", padding: "8px", background: "var(--bg-base)", border: "1px solid var(--border-default)", color: "var(--text-primary)", "border-radius": "4px" }}
+                  disabled={saving() === "smc_trader"}
+                />
+              </div>
+
+              <div class="form-group" style={{ "margin-bottom": "15px" }}>
+                <label style={{ display: "block", "margin-bottom": "5px", "font-size": "11px", color: "var(--text-secondary)" }}>
+                  Risk % per Trade: {smcTraderConfig()?.risk_per_trade_percent ?? "—"}%
+                </label>
+                <input
+                  type="range"
+                  min="0.1"
+                  max="3"
+                  step="0.1"
+                  value={smcTraderConfig()?.risk_per_trade_percent || 0.5}
+                  onChange={(e) => saveConfig("smc_trader", { risk_per_trade_percent: Number(e.currentTarget.value) })}
+                  style={{ width: "100%" }}
+                  disabled={saving() === "smc_trader"}
+                />
+              </div>
+
+              <div class="form-group" style={{ "margin-bottom": "15px" }}>
+                <label style={{ display: "block", "margin-bottom": "5px", "font-size": "11px", color: "var(--text-secondary)" }}>
+                  Min Quality
+                </label>
+                <select
+                  style={{ width: "100%", padding: "8px", background: "var(--bg-base)", border: "1px solid var(--border-default)", color: "var(--text-primary)", "border-radius": "4px" }}
+                  value={smcTraderConfig()?.min_quality || "medium"}
+                  onChange={(e) => saveConfig("smc_trader", { min_quality: e.currentTarget.value })}
+                  disabled={saving() === "smc_trader"}
+                >
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </select>
+              </div>
+
+              <div class="form-group" style={{ "margin-bottom": "15px" }}>
+                <label style={{ display: "block", "margin-bottom": "5px", "font-size": "11px", color: "var(--text-secondary)" }}>
+                  Min R:R Ratio: {smcTraderConfig()?.min_rr_ratio ?? "—"}
+                </label>
+                <input
+                  type="number"
+                  min="0.5"
+                  max="10"
+                  step="0.5"
+                  value={smcTraderConfig()?.min_rr_ratio || 1.5}
+                  onChange={(e) => saveConfig("smc_trader", { min_rr_ratio: Number(e.currentTarget.value) })}
+                  style={{ width: "100%", padding: "8px", background: "var(--bg-base)", border: "1px solid var(--border-default)", color: "var(--text-primary)", "border-radius": "4px" }}
+                  disabled={saving() === "smc_trader"}
+                />
+              </div>
+
+              <div class="form-group" style={{ "margin-bottom": "15px" }}>
+                <label style={{ display: "block", "margin-bottom": "5px", "font-size": "11px", color: "var(--text-secondary)" }}>
+                  Scale-Out %: {smcTraderConfig()?.scale_out_pct ?? "—"}%
+                </label>
+                <input
+                  type="range"
+                  min="10"
+                  max="90"
+                  step="5"
+                  value={smcTraderConfig()?.scale_out_pct || 50}
+                  onChange={(e) => saveConfig("smc_trader", { scale_out_pct: Number(e.currentTarget.value) })}
+                  style={{ width: "100%" }}
+                  disabled={saving() === "smc_trader"}
+                />
+                <div style={{ "font-size": "9px", color: "var(--text-muted)", "margin-top": "4px" }}>
+                  Percentage of position to close when TP1 is reached.
+                </div>
+              </div>
+
+              <Show when={saving() === "smc_trader"}>
+                <div style={{ "font-size": "9px", color: "var(--text-muted)" }}>
+                  Saving...
+                </div>
+              </Show>
+            </Show>
+          </div>
         </div>
       </div>
 

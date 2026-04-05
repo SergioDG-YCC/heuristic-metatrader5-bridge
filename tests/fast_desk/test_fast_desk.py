@@ -2,10 +2,19 @@
 from __future__ import annotations
 
 import math
-import pytest
+from pathlib import Path
 
+from heuristic_mt5_bridge.fast_desk import activity_log
+from heuristic_mt5_bridge.fast_desk.activity_log import pipeline_recent, recent
+from heuristic_mt5_bridge.fast_desk.context import FastContextConfig
+from heuristic_mt5_bridge.fast_desk.custody import FastCustodyPolicyConfig
+from heuristic_mt5_bridge.fast_desk.pending import FastPendingPolicyConfig
 from heuristic_mt5_bridge.fast_desk.policies.entry import FastEntryPolicy
 from heuristic_mt5_bridge.fast_desk.risk.engine import FastRiskConfig, FastRiskEngine
+from heuristic_mt5_bridge.fast_desk.setup import FastSetupConfig
+from heuristic_mt5_bridge.fast_desk.state.desk_state import SymbolDeskState
+from heuristic_mt5_bridge.fast_desk.trader import FastTraderConfig, FastTraderService
+from heuristic_mt5_bridge.fast_desk.trigger import FastTriggerConfig
 
 
 # ---------------------------------------------------------------------------
@@ -163,4 +172,59 @@ class TestFastEntryPolicy:
         allowed, reason = self.policy.can_open("EURUSD", "buy", open_positions, self.config)
         assert allowed is False
         assert "max total" in reason
+
+
+class _EmptyMarketState:
+    def get_candles(self, symbol: str, timeframe: str, bars: int) -> list[dict]:
+        _ = symbol, timeframe, bars
+        return []
+
+
+class _SpecRegistryStub:
+    def pip_size(self, symbol: str) -> float:
+        _ = symbol
+        return 0.0001
+
+    def get(self, symbol: str) -> dict:
+        _ = symbol
+        return {"point": 0.0001}
+
+
+def test_trader_emits_pipeline_trace_when_market_state_is_insufficient() -> None:
+    activity_log._global_ring.clear()
+    activity_log._symbol_rings.clear()
+    activity_log._pipeline_ring.clear()
+    activity_log._pipeline_cursor = 0
+
+    trader = FastTraderService(
+        trader_config=FastTraderConfig(signal_cooldown=60.0),
+        context_config=FastContextConfig(),
+        setup_config=FastSetupConfig(),
+        trigger_config=FastTriggerConfig(),
+        pending_config=FastPendingPolicyConfig(),
+        custody_config=FastCustodyPolicyConfig(),
+    )
+
+    result = trader.scan_and_execute(
+        symbol="EURUSD",
+        market_state=_EmptyMarketState(),
+        spec_registry=_SpecRegistryStub(),
+        account_payload_ref=lambda: {},
+        connector=object(),
+        db_path=Path("runtime.db"),
+        broker_server="Broker",
+        account_login=123,
+        state=SymbolDeskState(),
+        risk_config=FastRiskConfig(),
+    )
+
+    assert result is None
+    events = recent(5)
+    traces = pipeline_recent(5)
+    assert events
+    assert events[0]["gate_reached"] == "context"
+    assert events[0]["details"]["message"] == "insufficient_candles"
+    assert traces
+    assert traces[0]["final_gate"] == "context"
+    assert traces[0]["stages"][0]["details"]["message"] == "insufficient_candles"
 

@@ -15,10 +15,12 @@ import type {
   FastActivityResponse,
   FastSignalRow,
   FastTradeLogRow,
+  FastZoneRow,
   SmcThesis,
   SmcZone,
   SmcEventRow,
   PipelineSnapshotResponse,
+  CorrelationMatrixResponse,
 } from "../types/api";
 
 const BACKEND = ""; // proxied through Vite dev server
@@ -103,6 +105,8 @@ export const api = {
   setLlmDefaultModel: (model_id: string) => put<{ status: string; model_id: string; message: string }>("/api/v1/llm/models/default", { model_id }),
   getSmcConfig: () => get<{ status: string; config: any }>("/api/v1/config/smc"),
   updateSmcConfig: (config: any) => put<{ status: string; config: any; message: string }>("/api/v1/config/smc", config),
+  getSmcTraderConfig: () => get<{ status: string; config: any }>("/api/v1/config/smc/trader"),
+  updateSmcTraderConfig: (config: any) => put<{ status: string; config: any; message: string }>("/api/v1/config/smc/trader", config),
   getFastConfig: () => get<{ status: string; config: any }>("/api/v1/config/fast"),
   updateFastConfig: (config: any) => put<{ status: string; config: any; message: string }>("/api/v1/config/fast", config),
   setFastDeskEnabled: (enabled: boolean) => put<{ status: string; enabled: boolean; message: string }>("/api/v1/config/fast/enabled", { enabled }),
@@ -114,6 +118,7 @@ export const api = {
   // Fast Desk — Activity & Signals
   fastActivity: (limit = 50) => get<FastActivityResponse>(`/api/v1/fast/activity?limit=${limit}`),
   fastActivitySymbol: (symbol: string, limit = 50) => get<{ status: string; symbol: string; events: FastActivityResponse["events"]; updated_at: string }>(`/api/v1/fast/activity/${symbol}?limit=${limit}`),
+  fastZones: (symbol?: string) => get<{ status: string; zones: FastZoneRow[]; updated_at: string }>(symbol ? `/api/v1/fast/zones?symbol=${symbol}` : "/api/v1/fast/zones"),
   fastSignals: (limit = 50) => get<{ status: string; signals: FastSignalRow[]; updated_at: string }>(`/api/v1/fast/signals?limit=${limit}`),
   fastTradeLog: (limit = 50) => get<{ status: string; events: FastTradeLogRow[]; updated_at: string }>(`/api/v1/fast/trade-log?limit=${limit}`),
   fastPipeline: (limit = 60) => get<PipelineSnapshotResponse>(`/api/v1/fast/pipeline?limit=${limit}`),
@@ -125,4 +130,7 @@ export const api = {
   getDeskAssignments: () => get<{ assignments: Record<string, string[]> }>("/api/v1/symbols/desk-assignments"),
   setSymbolDesks: (symbol: string, desks: string[]) =>
     put<{ symbol: string; desks: string[] }>(`/api/v1/symbols/${symbol}/desks`, { desks }),
+  // Correlation Engine
+  correlationMatrix: (timeframe: string) =>
+    get<CorrelationMatrixResponse>(`/api/v1/correlation/${timeframe}`),
 };

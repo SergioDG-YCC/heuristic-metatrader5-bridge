@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -152,6 +153,35 @@ def _setup(*, setup_type: str, requires_pending: bool, pending_entry_type: str) 
     )
 
 
+def _zone_setup(*, setup_type: str = "fvg_reaction") -> FastSetup:
+    setup = _setup(setup_type=setup_type, requires_pending=True, pending_entry_type="limit")
+    setup.metadata = {
+        "zone_reaction": True,
+        "zone_top": 1.1005,
+        "zone_bottom": 1.0995,
+        "timeframe_origin": "M5",
+    }
+    return setup
+
+
+def _setup_side(*, symbol: str, side: str, setup_type: str, requires_pending: bool, pending_entry_type: str) -> FastSetup:
+    return FastSetup(
+        setup_id=f"{symbol}_{setup_type}_{side}",
+        setup_type=setup_type,
+        symbol=symbol,
+        side=side,
+        entry_price=1.1000,
+        stop_loss=1.0990,
+        take_profit=1.1020,
+        risk_pips=10.0,
+        confidence=0.86,
+        requires_pending=requires_pending,
+        pending_entry_type=pending_entry_type,
+        retest_level=1.1000,
+        metadata={},
+    )
+
+
 def test_scan_blocks_entry_when_no_m1_trigger(monkeypatch, tmp_path: Path) -> None:
     service = _service()
     connector = _Connector()
@@ -184,6 +214,111 @@ def test_scan_blocks_entry_when_no_m1_trigger(monkeypatch, tmp_path: Path) -> No
     )
 
     assert result is None
+    assert connector.instructions == []
+
+
+def test_scan_reports_waiting_reaction_when_zone_setup_has_no_trigger(monkeypatch, tmp_path: Path) -> None:
+    service = _service()
+    connector = _Connector()
+    emitted: list[tuple[str, bool, dict[str, Any]]] = []
+
+    monkeypatch.setattr(service.context_service, "build_context", lambda **kwargs: _context())
+    monkeypatch.setattr(
+        service.setup_engine,
+        "detect_setups",
+        lambda **kwargs: [_zone_setup()],
+    )
+    monkeypatch.setattr(
+        service.trigger_engine,
+        "confirm",
+        lambda **kwargs: FastTriggerDecision(False, "none", 0.0, "m1_trigger_missing"),
+    )
+    monkeypatch.setattr(
+        "heuristic_mt5_bridge.fast_desk.trader.service.activity_log.emit",
+        lambda symbol, stage, ok, details: emitted.append((stage, ok, details)),
+    )
+    monkeypatch.setattr(
+        "heuristic_mt5_bridge.fast_desk.trader.service.activity_log.emit_pipeline_trace",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr("heuristic_mt5_bridge.fast_desk.trader.service.runtime_db.upsert_fast_signal", lambda *a, **k: None)
+    monkeypatch.setattr("heuristic_mt5_bridge.fast_desk.trader.service.runtime_db.append_fast_trade_log", lambda *a, **k: None)
+
+    result = service.scan_and_execute(
+        symbol="EURUSD",
+        market_state=_MarketState(),
+        spec_registry=_SpecRegistry(),
+        account_payload_ref=lambda: {"account_state": {"balance": 10000.0, "equity": 10000.0}, "positions": []},
+        connector=connector,
+        db_path=tmp_path / "runtime.db",
+        broker_server="Broker-1",
+        account_login=123456,
+        state=SymbolDeskState(),
+        risk_config=FastRiskConfig(),
+    )
+
+    assert result is None
+    trigger_events = [event for event in emitted if event[0] == "trigger"]
+    assert trigger_events
+    assert trigger_events[-1][2]["reason"] == "local_zone_detected_waiting_reaction"
+    assert trigger_events[-1][2]["zone_setup_count"] == 1
+
+
+def test_scan_blocks_correlated_conflict_after_confirmation(monkeypatch, tmp_path: Path) -> None:
+    service = _service()
+    connector = _Connector()
+    emitted: list[tuple[str, bool, dict[str, Any]]] = []
+
+    monkeypatch.setattr(service.context_service, "build_context", lambda **kwargs: _context())
+    monkeypatch.setattr(
+        service.setup_engine,
+        "detect_setups",
+        lambda **kwargs: [
+            _setup_side(
+                symbol="GBPUSD",
+                side="sell",
+                setup_type="order_block_retest",
+                requires_pending=True,
+                pending_entry_type="limit",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        service.trigger_engine,
+        "confirm",
+        lambda **kwargs: FastTriggerDecision(True, "zone_reclaim", 0.85, "ok"),
+    )
+    monkeypatch.setattr(
+        "heuristic_mt5_bridge.fast_desk.trader.service.activity_log.emit",
+        lambda symbol, stage, ok, details: emitted.append((stage, ok, details)),
+    )
+    monkeypatch.setattr(
+        "heuristic_mt5_bridge.fast_desk.trader.service.activity_log.emit_pipeline_trace",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr("heuristic_mt5_bridge.fast_desk.trader.service.runtime_db.upsert_fast_signal", lambda *a, **k: None)
+    monkeypatch.setattr("heuristic_mt5_bridge.fast_desk.trader.service.runtime_db.append_fast_trade_log", lambda *a, **k: None)
+
+    result = service.scan_and_execute(
+        symbol="GBPUSD",
+        market_state=_MarketState(),
+        spec_registry=_SpecRegistry(),
+        account_payload_ref=lambda: {
+            "account_state": {"balance": 10000.0, "equity": 10000.0},
+            "positions": [{"position_id": 10, "symbol": "EURUSD", "type": 0}],
+        },
+        connector=connector,
+        db_path=tmp_path / "runtime.db",
+        broker_server="Broker-1",
+        account_login=123456,
+        state=SymbolDeskState(),
+        risk_config=FastRiskConfig(),
+    )
+
+    assert result is None
+    correlation_events = [event for event in emitted if event[0] == "correlation"]
+    assert correlation_events
+    assert correlation_events[-1][2]["reason"] == "correlation_conflict"
     assert connector.instructions == []
 
 
@@ -397,6 +532,128 @@ def test_ranging_context_filters_breakout_setup_even_with_trigger(monkeypatch, t
 
     assert out is None
     assert connector.instructions == []
+
+
+def test_inherited_position_gets_initial_protection_and_hold_during_process_grace(
+    monkeypatch, tmp_path: Path
+) -> None:
+    service = _service()
+    state = SymbolDeskState()
+    connector = _CustodyConnector()
+    close_calls: list[int] = []
+
+    monkeypatch.setattr(service.context_service, "build_context", lambda **kwargs: _context())
+    monkeypatch.setattr(
+        service.custody_engine,
+        "evaluate_position",
+        lambda **kwargs: FastCustodyDecision(action="close", position_id=99, reason="should_not_close_in_grace"),
+    )
+    monkeypatch.setattr(
+        service.execution,
+        "apply_professional_custody",
+        lambda *a, **k: close_calls.append(99) or {"ok": True},
+    )
+    monkeypatch.setattr("heuristic_mt5_bridge.fast_desk.trader.service.runtime_db.append_fast_trade_log", lambda *a, **k: None)
+
+    positions = [
+        {
+            "position_id": 99,
+            "symbol": "EURUSD",
+            "side": "buy",
+            "price_open": 1.1000,
+            "price_current": 1.0990,
+            "stop_loss": 0.0,
+            "take_profit": 0.0,
+            "volume": 0.10,
+        }
+    ]
+    # Old adopted_at simulates restart with stale DB ownership row.
+    ownership_rows = [
+        {
+            "desk_owner": "fast",
+            "ownership_status": "inherited_fast",
+            "position_id": 99,
+            "adopted_at": "2026-03-28T00:00:00Z",
+        }
+    ]
+
+    result = service.run_custody(
+        symbol="EURUSD",
+        market_state=_MarketState(),
+        spec_registry=_SpecRegistry(),
+        account_payload_ref=lambda: {"positions": positions, "orders": []},
+        connector=connector,
+        db_path=tmp_path / "runtime.db",
+        broker_server="Broker-1",
+        account_login=123456,
+        state=state,
+        risk_action_ref=lambda action_type: {"allowed": True, "action_type": action_type},
+        ownership_open_ref=lambda: ownership_rows,
+    )
+
+    assert result["positions"] == 1
+    assert len(connector.calls) == 1
+    assert close_calls == []
+    assert 99 in state.adopted_protection_attempted
+    assert 99 in state.inherited_first_seen_at
+
+
+def test_inherited_position_can_close_after_grace_window(monkeypatch, tmp_path: Path) -> None:
+    service = _service()
+    state = SymbolDeskState()
+    close_calls: list[int] = []
+
+    monkeypatch.setattr(service.context_service, "build_context", lambda **kwargs: _context())
+    monkeypatch.setattr(
+        service.custody_engine,
+        "evaluate_position",
+        lambda **kwargs: FastCustodyDecision(action="close", position_id=99, reason="close_after_grace"),
+    )
+    monkeypatch.setattr(
+        service.execution,
+        "apply_professional_custody",
+        lambda *a, **k: close_calls.append(99) or {"ok": True},
+    )
+    monkeypatch.setattr("heuristic_mt5_bridge.fast_desk.trader.service.runtime_db.append_fast_trade_log", lambda *a, **k: None)
+
+    state.inherited_first_seen_at[99] = time.time() - 600.0
+    positions = [
+        {
+            "position_id": 99,
+            "symbol": "EURUSD",
+            "side": "buy",
+            "price_open": 1.1000,
+            "price_current": 1.0990,
+            "stop_loss": 1.0980,
+            "take_profit": 1.1020,
+            "volume": 0.10,
+        }
+    ]
+    ownership_rows = [
+        {
+            "desk_owner": "fast",
+            "ownership_status": "inherited_fast",
+            "position_id": 99,
+            "adopted_at": "2026-03-28T00:00:00Z",
+        }
+    ]
+
+    result = service.run_custody(
+        symbol="EURUSD",
+        market_state=_MarketState(),
+        spec_registry=_SpecRegistry(),
+        account_payload_ref=lambda: {"positions": positions, "orders": []},
+        connector=_Connector(),
+        db_path=tmp_path / "runtime.db",
+        broker_server="Broker-1",
+        account_login=123456,
+        state=state,
+        risk_action_ref=lambda action_type: {"allowed": True, "action_type": action_type},
+        ownership_open_ref=lambda: ownership_rows,
+    )
+
+    assert result["positions"] == 1
+    assert close_calls == [99]
 
 
 def test_pullback_context_allows_strong_reclaim_setup(monkeypatch, tmp_path: Path) -> None:

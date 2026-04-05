@@ -24,6 +24,7 @@ const deskItems: NavItem[] = [
   { path: "/fast/pipeline", icon: "▸", title: "Pipeline",  accent: "var(--teal)" },
   { path: "/smc",           icon: "◆", title: "SMC Desk",  accent: "var(--blue)" },
   { path: "/risk",          icon: "⊘", title: "Risk Center", accent: "var(--amber)" },
+  { path: "/correlation",   icon: "⊠", title: "Correlation Matrix", accent: "var(--cyan-live)" },
 ];
 
 const govItems: NavItem[] = [

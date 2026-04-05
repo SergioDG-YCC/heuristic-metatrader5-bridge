@@ -8,6 +8,136 @@ Versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Correlation engine, desk wiring & WebUI heatmap (2026-04-05)
+
+Full cross-symbol Pearson correlation engine integrated end-to-end: core service, desk policies, HTTP endpoints, and WebUI visualization.
+
+#### Core correlation engine (`core/correlation/`)
+
+- **`service.py`** — `CorrelationService`: background loop refreshes all `(symbol_a × symbol_b × timeframe)` matrices every `CORRELATION_REFRESH_SECONDS` (default 60 s). Uses `MarketStateService.get_candles()` as the only data source — pure RAM, no disk. Prints `[correlation] M5 pairs=N coverage_ok=N stale=N elapsed=Xs` every cycle. `get_matrix(tf)`, `get_pair(a, b, tf)`, `get_exposure_relations(symbol, tf)`, `active_symbols()` public API.
+- **`models.py`** — `CorrelationMatrixSnapshot` (timestamp, timeframe, N×M pair list, `all_pairs_coverage_ok`, `compute_stale`). `CorrelationPairValue` carries `symbol_a`, `symbol_b`, `correlation`, `coverage_bars`, `n_aligned`, `source_stale`.
+- **`aligner.py`** — `align_and_returns(candles_a, candles_b)`: inner join by ISO epoch, computes simple or log returns, returns `AlignmentResult(returns_a, returns_b, n_aligned, coverage_ratio)`. Requires ≥ `CORRELATION_MIN_COVERAGE_BARS` (default 30) aligned bars.
+- Pure Python `_pearson()` implementation — clamped to `[−1, 1]`, returns `None` on zero variance or insufficient data.
+- `CoreRuntimeService.correlation_service` created at startup when `CORRELATION_ENABLED=true`, lifecycle managed via `run_forever()`.
+
+#### HTTP endpoints
+
+- `GET /api/v1/correlation/{tf}` — full N×N matrix as `{pairs: [...], symbols: [...], timeframe, computed_at}`. Returns HTTP 503 when `CORRELATION_ENABLED=false`.
+- `GET /api/v1/correlation/{tf}/{symbol_a}/{symbol_b}` — single pair value with staleness flag.
+
+#### Fast Desk — correlation policy (`fast_desk/correlation/policy.py`)
+
+- **`FastCorrelationPolicy`**: two risk detectors applied before entry (`timeframe="M5"`, threshold 0.80):
+  - **Implicit hedge** — existing position on `symbol_b` with opposite side while `corr(a,b) > threshold` → blocks entry.
+  - **Inverse concentration** — existing position on `symbol_b` with same side while `corr(a,b) < −threshold` → blocks entry.
+- `check_entry_conflict(symbol, side, open_positions)` → `(blocked: bool, reason: str | None)` injected into `FastContext.warnings`.
+- `build_details(symbol)` → dict enriching `FastContext.details["correlation"]`.
+- Wired to `FastContextService(context_config, correlation_policy=policy)` (param already existed; now receives a live policy instance).
+
+#### SMC Desk — correlation formatter (`smc_desk/correlation/formatter.py`)
+
+- **`SmcCorrelationFormatter`**: `timeframe="H1"`, `top_n=5` highest-magnitude pairs.
+- `build_context_dict(symbol)` → structured dict injected into `analyst_input["correlation_context"]`.
+- `build_context_snippet(symbol)` → plain-text block for LLM system prompt.
+- Wired to `run_smc_heuristic_analyst(..., correlation_formatter=formatter)` (param already existed; now receives a live formatter instance).
+
+#### Desk wiring (`core/runtime/service.py` + 4 desk files)
+
+Five files modified to thread `CorrelationService` from `CoreRuntimeService` down to each consuming component:
+
+| File | Change |
+|---|---|
+| `fast_desk/workers/symbol_worker.py` | `run()` accepts `correlation_policy`, forwards to `FastTraderService` |
+| `fast_desk/trader/service.py` | `__init__` accepts `correlation_policy`, passes to `FastContextService` |
+| `fast_desk/runtime.py` | `FastDeskService` stores `_correlation_policy`; `create_fast_desk_service(db_path, correlation_service=None)` builds `FastCorrelationPolicy(svc, "M5")` when enabled |
+| `smc_desk/runtime.py` | `SmcDeskService` stores `_correlation_formatter`; `create_smc_desk_service(db_path, correlation_service=None)` builds `SmcCorrelationFormatter(svc, "H1", top_n=5)` when enabled |
+| `core/runtime/service.py` | Both factory calls receive `correlation_service=service.correlation_service` |
+
+Both desk factories use `Optional` pattern — when `CORRELATION_ENABLED=false` all references stay `None` and all downstream code is a no-op.
+
+#### WebUI — Correlation Heatmap (`apps/webui/src/routes/Correlation.tsx`)
+
+- N×N CSS table heatmap. Color scale: red (−1.0) → white (0.0) → green (+1.0).
+- Timeframe tabs: M5 / M30 / H1.
+- **Stale source visibility**: amber banner when all data is stale (market closed / feed offline); stale cells show `~` prefix, amber border, reduced opacity 0.75, and extended tooltip with staleness note.
+- New types: `CorrelationPairRow`, `CorrelationMatrixResponse` in `types/api.ts`.
+- `api.correlationMatrix(timeframe)` in `client.ts`.
+- Vite proxy: `/api/v1/correlation` added to `vite.config.ts`.
+- Route `/correlation` in `App.tsx`, `⊠ Correlation Matrix` nav item in `AppNav.tsx`.
+
+#### Tests
+
+- **50 new tests** across 3 files: `test_correlation_aligner.py`, `test_correlation_numerical.py`, `test_correlation_service.py`.
+- Total test suite: **203 tests, all passing**.
+
+---
+
+### Added — SMC Trader: full execution pipeline (2026-04-03)
+
+Six new modules implement thesis-to-MT5 pending order execution:
+
+- **`smc_desk/trader/config.py`** — `SmcTraderConfig` dataclass loaded from env vars: `SMC_TRADER_ENABLED`, `SMC_TRADER_RISK_PER_TRADE_PCT` (default 0.5), `SMC_TRADER_MAX_LOT_SIZE` (default 10.0), `max_positions_per_symbol`, `max_positions_total`, `min_quality`, `min_rr_ratio`, `pending_ttl_seconds`, `custody_interval_seconds`, `scale_out_pct`, `bias_change_cooldown_seconds`, `entry_zone_buffer_pips`.
+- **`smc_desk/trader/entry_policy.py`** — `SmcEntryPolicy`: duplicate prevention (same symbol+side), total position cap, directional concentration guard (≥70% same side blocks new).
+- **`smc_desk/trader/pending.py`** — `SmcPendingManager`: evaluates thesis candidates against current price, builds `SmcPendingDecision` (place/modify/cancel/hold). Accepts thesis status `active`, `prepared`, and `watching`.
+- **`smc_desk/trader/service.py`** — `SmcTraderService`: orchestrates candidate → entry policy → risk gate → pending decision → risk-based lot sizing → MT5 execution. Normalizes `entry_type` (`buy_limit` → `limit`, `sell_stop` → `stop`) for connector compatibility.
+- **`smc_desk/trader/custody.py`** — `SmcCustodyEngine`: break-even, scale-out, and hard-cut custody for open SMC positions.
+- **`smc_desk/trader/worker.py`** — `SmcTraderWorker`: async worker that loads thesis, fetches price via `get_candles("M1", 1)`, delegates to `SmcTraderService.process_thesis()`. Uses `asyncio.get_running_loop()` captured before `asyncio.to_thread()` for thread-safe MT5 calls.
+
+#### Runtime wiring
+
+- **`smc_desk/runtime.py`**: reconciliation loop always launches (regardless of initial `enabled` state), dynamically checks `SmcTraderConfig.enabled` each cycle. Added `_ensure_trader()` for lazy trader creation. Per-symbol event deduplication via `_enqueued_symbols` set prevents queue flooding (scanner can emit 40+ events per symbol per cycle).
+- **`apps/control_plane.py`**: `.env` values now injected into `os.environ` via `os.environ.setdefault()` loop in `lifespan()`, fixing `SmcTraderConfig.from_env()` which uses `os.getenv()` directly.
+
+#### Risk-based lot sizing
+
+- **Lot calculation always uses `FastRiskEngine.calculate_lot_size()`** — thesis `volume_options` (LLM-generated, account-unaware) are ignored. Formula: `risk_amount / (sl_points × tick_value)` with margin check (≤50% free margin) and cap at `SmcTraderConfig.max_lot_size`.
+- **RiskKernel profile integration** — when `risk_gate_ref` returns a profile-based `risk_per_trade_pct` (e.g. profile 4 → 2.0%), that value overrides the config default. Enables centralized risk control across desks.
+
+#### WebUI integration
+
+- **`Settings.tsx`**: new "SMC Trader" section with toggle for `SMC_TRADER_ENABLED`, visible when SMC desk is active.
+- **`client.ts`**: API client updated with SMC trader config endpoints.
+
+#### Infrastructure
+
+- **`runtime_db.py`**: new `smc_thesis_orders` table schema (thesis_id, symbol, mt5_order_id, mt5_position_id, operation_type, side, entry_price, stop_loss, take_profit, volume, status).
+- **`core/runtime/service.py`**: SMC trader hooks exposed from `CoreRuntimeService` (risk gate, ownership register).
+- **`configs/base.env.example`**: added all `SMC_TRADER_*` env var documentation.
+
+### Fixed — SMC candidate generation pipeline (2026-04-02)
+
+- **Skip LLM when candidates=0**: `call_smc_validator` no longer invoked if heuristic pipeline produced no operation candidates. Saves GPU cycles on every empty thesis.
+- **Confluence gate lowered from ≥2 to ≥1**: a single valid OB or FVG now generates a preparatory candidate. The previous gate silently discarded all zones with only one structural signal.
+- **CHoCH detection window expanded from 8 to 20 swings**: covers ~10 weeks on D1 instead of ~4. Both CHoCH detection and trend derivation use the wider window.
+- **CHoCH↔zone overlap tolerance relaxed from 0.1% to 0.5%**: `choch_at_origin` confluence now matches zones within ±0.5% of CHoCH price (was ±0.1%, too tight for real charts).
+- **Sweep↔CHoCH correlation window expanded from 5 to 10 bars**: captures sweep→reversal sequences that develop over more candles.
+- **Bar depth tripled** — scanner and analyst defaults now D1=300, H4=600, H1=900 (was 100/200/300). All configurable via `SMC_ANALYST_*_BARS` and `SMC_SCANNER_*_BARS` env vars.
+
+### Fixed — SMC LLM pipeline audit (2026-04-02)
+
+#### Config wiring bug (H1, H4)
+- **`heuristic_analyst.py`**: `call_smc_validator` now passes full config dict (`max_tokens`, `temperature`, `localai_base_url`) instead of only model and timeout. Previously `max_tokens` always fell back to 500 regardless of `.env` value.
+- **`SmcAnalystConfig`**: new `localai_base_url` field loaded from `LOCALAI_BASE_URL` env var, eliminating scattered `os.getenv` calls.
+
+#### LLM concurrency saturation (critical)
+- **`runtime.py`**: `_dispatch_loop` now `await`s each analyst run instead of firing concurrent `create_task`. With N symbols active, previously N HTTP calls hit LocalAI simultaneously, saturating a single-GPU inference slot and causing cascading timeouts.
+- **`validator.py`**: `_LLM_GATE` (`asyncio.Lock`) ensures only one HTTP call to LocalAI is in flight at any time. Combined with sequential dispatch, the outbound queue always holds 0 or 1 requests.
+
+#### Prompt caching + versioning
+- **`validator.py`**: prompts loaded once and cached in `_PROMPT_CACHE`. `get_prompt_version()` returns a SHA-1 short hash for future LoRA traceability.
+
+#### Operational logging
+- **`validator.py`**: `call_smc_validator` now prints structured `[smc-validator]` lines with elapsed time, prompt/completion tokens, input chars, and budget. Warns when completion tokens exceed 80% of `max_tokens`.
+
+#### Temperature from config
+- **`_call_localai_sync`**: `temperature` is now a parameter (was hardcoded 0.1). Returns `(parsed_json, raw_content, usage)` tuple for observability.
+
+#### Passive LoRA traceability
+- **`heuristic_analyst.py`**: `HEURISTIC_VERSION = "2026.04"` constant added (no runtime effect, for future dataset curation).
+
+#### .env example
+- **`configs/base.env.example`**: `SMC_LLM_MAX_TOKENS` lowered from 8192 to 500 (matches effective fallback that was always applied).
+
 ### Added
 - `TRADERS_GUIDE.es.md` — new trader-friendly documentation in Spanish, focused on explaining the system architecture, market desks, risk management, and WebUI panels in accessible language. Complements the technical `README.es.md` and serves as onboarding guide for traders of all experience levels.
 

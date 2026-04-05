@@ -120,9 +120,11 @@ Su pipeline real es:
 scanner heuristico
 -> analista heuristico
 -> validador heuristico
--> validador LLM opcional
+-> validador LLM opcional (secuencial, una consulta a la vez)
 -> thesis store
 ```
+
+El dispatch procesa un simbolo completo antes de pasar al siguiente. La bandeja de salida hacia LocalAI siempre tiene como maximo una consulta. Esto evita saturar la GPU cuando hay multiples simbolos activos.
 
 En esta mesa se buscan zonas y contextos donde valga la pena preparar una operacion, no entrar por impulso.
 

@@ -17,7 +17,10 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from heuristic_mt5_bridge.smc_desk.correlation.formatter import SmcCorrelationFormatter
 
 from heuristic_mt5_bridge.core.runtime.market_state import MarketStateService
 from heuristic_mt5_bridge.core.runtime.spec_registry import SymbolSpecRegistry
@@ -46,6 +49,10 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+# Bump when heuristic logic changes materially (bias derivation, scoring, candidate gates).
+HEURISTIC_VERSION = "2026.04"
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -56,14 +63,15 @@ class SmcAnalystConfig:
     max_candidates: int = 3
     min_rr: float = 3.0
     next_review_hint_seconds: int = 14400
-    d1_bars: int = 100
-    h4_bars: int = 200
-    h1_bars: int = 300
+    d1_bars: int = 300
+    h4_bars: int = 600
+    h1_bars: int = 900
     llm_enabled: bool = True
     llm_model: str = "gemma-3-4b-it-qat"
     llm_timeout_seconds: int = 60
     llm_max_tokens: int = 500
     llm_temperature: float = 0.1
+    localai_base_url: str = "http://127.0.0.1:8080"
     analyst_cooldown_seconds: int = 300
     spread_tolerance: str = "high"  # "low" | "medium" | "high" — SMC uses higher default (long-term trades)
     spread_thresholds: dict[str, dict[str, float]] = field(default_factory=lambda: {
@@ -81,14 +89,15 @@ class SmcAnalystConfig:
             max_candidates=int(_env("SMC_HEURISTIC_MAX_CANDIDATES", "3")),
             min_rr=float(_env("SMC_MIN_RR", "3.0")),
             next_review_hint_seconds=int(_env("SMC_HEURISTIC_NEXT_REVIEW_SECONDS", "14400")),
-            d1_bars=int(_env("SMC_ANALYST_D1_BARS", "100")),
-            h4_bars=int(_env("SMC_ANALYST_H4_BARS", "200")),
-            h1_bars=int(_env("SMC_ANALYST_H1_BARS", "300")),
+            d1_bars=int(_env("SMC_ANALYST_D1_BARS", "300")),
+            h4_bars=int(_env("SMC_ANALYST_H4_BARS", "600")),
+            h1_bars=int(_env("SMC_ANALYST_H1_BARS", "900")),
             llm_enabled=_env("SMC_LLM_ENABLED", "true").strip().lower() in ("1", "true", "yes"),
             llm_model=_env("SMC_LLM_MODEL", "gemma-3-4b-it-qat"),
             llm_timeout_seconds=int(_env("SMC_LLM_TIMEOUT_SECONDS", "60")),
             llm_max_tokens=int(_env("SMC_LLM_MAX_TOKENS", "500")),
             llm_temperature=float(_env("SMC_LLM_TEMPERATURE", "0.1")),
+            localai_base_url=_env("LOCALAI_BASE_URL", "http://127.0.0.1:8080"),
             analyst_cooldown_seconds=int(_env("SMC_ANALYST_COOLDOWN_SECONDS", "300")),
             spread_tolerance=_env("SMC_SPREAD_TOLERANCE", "high").strip().lower() if _env("SMC_SPREAD_TOLERANCE", "high").strip().lower() in ("low", "medium", "high") else "high",
         )
@@ -107,6 +116,7 @@ class SmcAnalystConfig:
             "llm_timeout_seconds": self.llm_timeout_seconds,
             "llm_max_tokens": self.llm_max_tokens,
             "llm_temperature": self.llm_temperature,
+            "localai_base_url": self.localai_base_url,
             "analyst_cooldown_seconds": self.analyst_cooldown_seconds,
             "spread_tolerance": self.spread_tolerance,
             "spread_thresholds": self.spread_thresholds,
@@ -453,6 +463,7 @@ def build_heuristic_output(
     account_login: int,
     spec_registry: SymbolSpecRegistry,
     config: SmcAnalystConfig,
+    correlation_formatter: SmcCorrelationFormatter | None = None,
 ) -> dict[str, Any]:
     d1 = service.get_candles(symbol, "D1", bars=config.d1_bars)
     h4 = service.get_candles(symbol, "H4", bars=config.h4_bars)
@@ -544,8 +555,8 @@ def build_heuristic_output(
         if sweeps and "sweep_present" not in confluences:
             confluences = list(confluences) + ["sweep_present"]
 
-        # Minimum confluence gate (≥2)
-        if len(confluences) < 2:
+        # Minimum confluence gate (≥1)
+        if len(confluences) < 1:
             continue
 
         # Anti-D1 guard: trading against D1 requires H4 CHoCH confirmed
@@ -694,6 +705,9 @@ def build_heuristic_output(
         "generated_at": _utc_now_iso(),
     }
 
+    if correlation_formatter is not None:
+        analyst_input["correlation_context"] = correlation_formatter.build_context_dict(symbol)
+
     return {
         "analyst_input": analyst_input,
         "heuristic_output": output,
@@ -718,6 +732,7 @@ async def run_smc_heuristic_analyst(
     account_login: int,
     spec_registry: SymbolSpecRegistry,
     config: SmcAnalystConfig,
+    correlation_formatter: SmcCorrelationFormatter | None = None,
 ) -> dict[str, Any]:
     """Run full SMC analyst pipeline and persist the resulting thesis.
 
@@ -739,6 +754,7 @@ async def run_smc_heuristic_analyst(
         account_login=account_login,
         spec_registry=spec_registry,
         config=config,
+        correlation_formatter=correlation_formatter,
     )
     analyst_input = payload["analyst_input"]
     heuristic_output = payload["heuristic_output"]
@@ -764,9 +780,10 @@ async def run_smc_heuristic_analyst(
         notes = (notes + " | " if notes else "") + f"hard_validator_issues={len(hard_issues)}"
         normalized_thesis["analyst_notes"] = notes[:1000]
 
-    # Optional LLM validation (1 call)
+    # Optional LLM validation (1 call) — skip if no candidates to validate
     validator_step: dict[str, Any]
-    if config.llm_enabled:
+    has_candidates = len(normalized_thesis.get("operation_candidates", [])) > 0
+    if config.llm_enabled and has_candidates:
         from heuristic_mt5_bridge.smc_desk.llm.validator import call_smc_validator
 
         validator_step = await call_smc_validator(
@@ -778,10 +795,13 @@ async def run_smc_heuristic_analyst(
             config={
                 "llm_model": config.llm_model,
                 "llm_timeout_seconds": config.llm_timeout_seconds,
+                "max_tokens": config.llm_max_tokens,
+                "temperature": config.llm_temperature,
+                "localai_base_url": config.localai_base_url,
             },
         )
     else:
-        # LLM disabled — pass through with accept decision
+        # LLM disabled or no candidates — pass through with accept decision
         validator_step = {
             "validated_thesis": normalized_thesis,
             "validator_result": {

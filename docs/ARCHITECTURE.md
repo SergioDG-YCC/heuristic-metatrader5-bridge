@@ -9,6 +9,10 @@
 > **Fast Desk 6-phase refactoring**: delivered 2026-03-28 — H1→M30 normalization, hard/soft gate split, ATR-aware EMA, M5-only market phase, setup/trigger engine fixes
 > **Broker clock architecture**: delivered 2026-03-28 — EA sends `TimeTradeServer()`/`TimeGMTOffset()`, gate uses system UTC + EA GMT offset, tick offset demoted to informative
 
+> **SMC LLM pipeline audit**: delivered 2026-04-02 — sequential dispatch (no concurrent GPU saturation), `_LLM_GATE` lock, config wiring fix, prompt cache, operational logging
+> **SMC Trader activation**: delivered 2026-04-03 — 6 new modules (config, entry_policy, pending, service, custody, worker), risk-based lot sizing via `FastRiskEngine`, RiskKernel profile integration, WebUI toggle, dynamic reconciliation loop
+> **Correlation engine**: delivered 2026-04-05 — `CorrelationService` computing Pearson matrices per timeframe (M5/M30/H1), `FastCorrelationPolicy` for implicit hedge + inverse concentration detection, `SmcCorrelationFormatter` for LLM context enrichment, WebUI heatmap with stale source visibility; all 5 runtime wiring changes complete; 203 tests passing
+
 ---
 
 ## Purpose
@@ -19,7 +23,7 @@ one market-state RAM backbone, and one HTTP control plane.
 | Desk | Latency target | LLM | Entry |
 |------|---------------|-----|-------|
 | **Fast Desk** | seconds | never | `FAST_TRADER_ENABLED=true` (alias: `FAST_DESK_ENABLED=true`) |
-| **SMC Desk** | minutes | optional, after heuristics | `SMC_SCANNER_ENABLED=true` |
+| **SMC Desk** | minutes | optional, after heuristics | `SMC_SCANNER_ENABLED=true` + `SMC_TRADER_ENABLED=true` |
 
 **The closer logic is to execution, the less it may depend on LLM, disk, or network.**
 
@@ -75,6 +79,66 @@ No global hardcoded slippage value is used.
 | Max positions | Total open ≥ `max_positions_total` → block |
 | Directional concentration | ≥ 70% of open positions (min 3) on same side → block new entries in that direction |
 
+---
+
+## Correlation Engine
+
+Optional component. Enabled via `CORRELATION_ENABLED=true`. Pure RAM — no disk writes.
+
+### Architecture
+
+```
+MarketStateService.get_candles(symbol, tf)
+        │
+        ▼
+CorrelationService (background loop, every CORRELATION_REFRESH_SECONDS = 60s)
+        │  aligner.align_and_returns()   → inner join by epoch, simple/log returns
+        │  _pearson()                    → clamped [-1, 1], None on insufficient data
+        │  CorrelationMatrixSnapshot     → RAM cache, atomic replace
+        ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                      Public API                                   │
+│  get_matrix(tf)                → full N×N snapshot               │
+│  get_pair(a, b, tf)            → CorrelationPairValue             │
+│  get_exposure_relations(s, tf) → pairs where s is involved        │
+│  active_symbols()              → current symbol universe          │
+└───────────────────────────────────────────────────────────────────┘
+        │                         │
+        ▼                         ▼
+Fast Desk                    SMC Desk
+FastCorrelationPolicy        SmcCorrelationFormatter
+(timeframe M5)               (timeframe H1, top_n=5)
+        │                         │
+        ▼                         ▼
+FastContext.details           analyst_input
+  ["correlation"]             ["correlation_context"]
+FastContext.warnings          + LLM system prompt snippet
+  ["correlation_conflict:…"]
+```
+
+### Staleness policy
+
+`source_stale=True` is set on any pair where either symbol's last candle is older than `CORRELATION_STALE_SOURCE_SECONDS` (default 300 s). Stale pairs are still returned; the caller decides whether to suppress or display with a warning. The WebUI heatmap shows an amber banner and `~` prefix on stale cells.
+
+### Fast Desk — `FastCorrelationPolicy`
+
+Two risk detectors applied at entry time on `FastContextService.build_context()`:
+
+| Detector | Condition | Action |
+|---|---|---|
+| Implicit hedge | Open position on symbol_B with **opposite** side, `corr(A,B) > 0.80` | Block entry, add `correlation_conflict:implicit_hedge` warning |
+| Inverse concentration | Open position on symbol_B with **same** side, `corr(A,B) < −0.80` | Block entry, add `correlation_conflict:inverse_concentration` warning |
+
+### SMC Desk — `SmcCorrelationFormatter`
+
+Injects correlation context into the analyst pipeline. `build_context_dict(symbol)` returns a structured dict for the Python analyst layer. `build_context_snippet(symbol)` returns plain text for the LLM system message. Both select `top_n=5` pairs by absolute correlation magnitude.
+
+### Runtime wiring
+
+`CORRELATION_ENABLED=true` → `CoreRuntimeService.correlation_service` is created → passed via `correlation_service=` kwargs to `create_fast_desk_service()` and `create_smc_desk_service()` → each factory instantiates its desk-specific wrapper → flows down to `FastContextService` (Fast Desk) and `run_smc_heuristic_analyst()` (SMC Desk) via existing optional parameters.
+
+`CORRELATION_ENABLED=false` (default) → all references stay `None` → zero runtime cost, all downstream code is a no-op.
+
 Preflight source print bundle (canonical reading evidence):
 
 - `docs/fast_trader/results/2026-03-24_fast_trader_print_bundle/print_manifest.json`
@@ -118,12 +182,25 @@ graph TD
 
     subgraph SMC["SMC Desk  SMC_SCANNER_ENABLED=true"]
         MS --> SMC_scan["SmcScannerService\nOB · FVG · liquidity · structure"]
-        SMC_scan -->|event queue| SMC_analyst["SmcAnalystService\nbias · scenario · candidates"]
+        SMC_scan -->|event queue\nper-symbol dedup| SMC_analyst["SmcAnalystService\nbias · scenario · candidates"]
         SMC_analyst --> SMC_val["HeuristicValidator\nconfidence · pip filter"]
         SMC_val -->|SMC_LLM_ENABLED| SMC_llm["LLM Validator\nGemma 3 12B · fallback"]
         SMC_llm --> SMC_thesis["ThesisStore\nLRU + SQLite"]
         SMC_thesis --> CP_status
         SMC_thesis --> DB
+    end
+
+    subgraph SMCT["SMC Trader  SMC_TRADER_ENABLED=true"]
+        SMC_thesis --> SMCT_worker["SmcTraderWorker\nreconciliation loop"]
+        SMCT_worker --> SMCT_policy["SmcEntryPolicy\nno dup · max pos · concentration"]
+        SMCT_policy --> SMCT_rk["RiskKernel gate\nevaluate_entry(desk='smc')\nkill-switch · budget · risk_pct"]
+        SMCT_rk --> SMCT_pending["SmcPendingManager\nevaluate thesis → place/modify/cancel"]
+        SMCT_pending --> SMCT_risk["FastRiskEngine\nbalance × risk_pct / (SL × tick_value)\nmargin check · max_lot cap"]
+        SMCT_risk --> SMCT_svc["SmcTraderService\nnormalize entry_type · execute"]
+        SMCT_svc -->|via _mt5_call lock| Conn
+        SMCT_svc --> DB
+        AS --> SMCT_cust["SmcCustodyEngine\nbreak-even · scale-out · hard-cut"]
+        SMCT_cust --> SMCT_worker
     end
 ```
 
@@ -276,18 +353,21 @@ sequenceDiagram
         Scan-->>Q: (event_type, symbol, payload)
     end
 
-    loop dispatch
+    loop dispatch (sequential — one symbol at a time)
         Q-->>Disp: event
         Disp->>Disp: check cooldown (300s per symbol)
-        Disp->>Analyst: run_smc_heuristic_analyst()
+        Disp->>Analyst: await run_smc_heuristic_analyst()
         Analyst->>Val: validate(thesis)
         alt heuristics pass
-            Val->>LLM: validate (if SMC_LLM_ENABLED)
+            Val->>LLM: validate (if SMC_LLM_ENABLED, gated by _LLM_GATE)
             LLM-->>Val: confirmation | skip
         end
         Val-->>Store: save_thesis()
+        Note over Disp: next symbol starts only after completion
     end
 ```
+
+> **Concurrency policy (v0.3.5)**: dispatch processes one symbol at a time (`await` instead of `create_task`). The LLM validator holds an `asyncio.Lock` (`_LLM_GATE`) so at most one HTTP call to LocalAI is in flight. This prevents GPU saturation on single-GPU setups running LocalAI with large models (Gemma 3 12B).
 
 ### SMC detection pipeline
 
@@ -722,8 +802,97 @@ MarketStateService RAM
   -> smc_heuristic_validators     (confidence & pip filters)
   -> optional multimodal LLM validator  (only if heuristics pass)
   -> smc_thesis
-  -> smc_trader  (SMC_TRADER_ENABLED=true — Step 4)
+  -> smc_trader  (SMC_TRADER_ENABLED=true)
 ```
+
+### SMC Trader execution pipeline (v0.3.5)
+
+```mermaid
+sequenceDiagram
+    participant Loop as Reconciliation Loop
+    participant Worker as SmcTraderWorker
+    participant Policy as SmcEntryPolicy
+    participant RK as RiskKernel
+    participant PM as SmcPendingManager
+    participant Risk as FastRiskEngine
+    participant Exec as FastExecutionBridge
+    participant MT5 as MT5Connector
+
+    loop every custody_interval_seconds (30s)
+        Loop->>Worker: process each watched symbol
+        Worker->>Worker: load thesis from ThesisStore
+        Worker->>Worker: get price via get_candles("M1", 1)
+        Worker->>Policy: can_open(symbol, side, owned_ops)
+        alt blocked by policy
+            Policy-->>Worker: (False, reason)
+        else allowed
+            Worker->>RK: evaluate_entry(desk="smc", symbol)
+            RK-->>Worker: {allowed, risk_per_trade_pct}
+            Worker->>PM: evaluate_new_thesis(thesis, price, pip_size)
+            PM-->>Worker: SmcPendingDecision(action="place")
+            Worker->>Risk: calculate_lot_size(balance, risk_pct, sl_pips, spec, account)
+            Risk-->>Worker: volume (risk-sized)
+            Worker->>Exec: send_entry(limit/stop, volume, SL, TP)
+            Exec->>MT5: order_send() via _mt5_call lock
+        end
+    end
+```
+
+#### Lot sizing formula
+
+```
+risk_amount  = balance × risk_per_trade_pct / 100
+sl_points    = sl_pips × (pip_size / point)
+lot_size     = risk_amount / (sl_points × tick_value)
+```
+
+Clamped by: `max(volume_min, min(volume_max, max_lot_size, margin_check))`.
+
+- `risk_per_trade_pct` sourced from `RiskKernel.evaluate_entry()` profile (overrides config default)
+- Margin check: lot size capped so estimated margin ≤ 50% of free margin
+- `volume_options` from LLM thesis are **ignored** — always uses risk engine
+
+#### Entry policy gates
+
+| Gate | Logic |
+|------|-------|
+| Duplicate prevention | Same symbol + same side already open → block |
+| Max positions per symbol | `max_positions_per_symbol` (default 1) |
+| Max positions total | `max_positions_total` (default 5) → block |
+| Directional concentration | ≥ 70% open on same side (min 3) → block |
+| Bias change cooldown | Same symbol bias flip within `bias_change_cooldown_seconds` → wait |
+| Minimum RR ratio | `(TP distance / SL distance) < min_rr_ratio` → reject |
+| Quality gate | Candidate quality < `min_quality` → reject |
+
+#### Thesis status handling
+
+| Thesis status | Trader action |
+|---------------|---------------|
+| `active`, `prepared`, `watching` | Evaluate for new order placement |
+| `invalidated`, `expired`, `closed` | Cancel existing pending orders |
+| Other statuses | Hold (no action) |
+
+#### Custody phases
+
+| Phase | Trigger | Action |
+|-------|---------|--------|
+| Break-even | Price reaches 1× SL distance in profit | Move SL to entry |
+| Scale-out | `scale_out_pct` of TP distance reached | Close partial at `scale_out_pct %` |
+| Hard cut | Position open > `pending_ttl_seconds` | Close at market |
+
+#### SMC Trader env vars
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SMC_TRADER_ENABLED` | `true` | Enable/disable trader execution |
+| `SMC_TRADER_RISK_PER_TRADE_PCT` | `0.5` | Fallback risk % (overridden by RiskKernel profile) |
+| `SMC_TRADER_MAX_LOT_SIZE` | `10.0` | Hard cap on lot size per order |
+| `SMC_TRADER_MAX_POSITIONS_SYMBOL` | `1` | Max open positions per symbol |
+| `SMC_TRADER_MAX_POSITIONS_TOTAL` | `5` | Max total open SMC positions |
+| `SMC_TRADER_MIN_QUALITY` | `medium` | Minimum candidate quality |
+| `SMC_TRADER_MIN_RR_RATIO` | `1.5` | Minimum reward/risk ratio |
+| `SMC_TRADER_PENDING_TTL` | `604800` | Pending order TTL in seconds |
+| `SMC_TRADER_CUSTODY_INTERVAL` | `30.0` | Reconciliation loop interval |
 
 #### Scanner zone lifecycle
 
@@ -740,11 +909,11 @@ MarketStateService RAM
 2. **Anti-D1 guard** — when candidate side opposes D1 trend, require H4 CHoCH `confirmed=True`.
 3. **ATR-calibrated SL** — stop-loss margin floored at `1.2 × ATR(H4, 14)` to avoid noise stops.
 
-`SmcDeskService.run_forever()` must receive the same authority hooks as the fast desk:
+`SmcDeskService.run_forever()` receives the same authority hooks as the fast desk:
 - `risk_gate_ref: Callable[[str], dict]` — delegates to `RiskKernel.evaluate_entry(desk="smc", symbol=...)`
 - `ownership_register_ref: Callable` — registers executed orders via `OwnershipRegistry`
 
-New env vars introduced in Step 4: `SMC_TRADER_ENABLED` (default `false`), `SMC_TRADER_RISK_PERCENT` (default `1.0`).
+Env vars: `SMC_TRADER_ENABLED` (default `true`), `SMC_TRADER_RISK_PER_TRADE_PCT` (default `0.5`, overridden by RiskKernel profile).
 
 ### LLM role
 

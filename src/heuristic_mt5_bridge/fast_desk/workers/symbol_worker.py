@@ -15,6 +15,7 @@ from heuristic_mt5_bridge.fast_desk.pending import FastPendingPolicyConfig
 from heuristic_mt5_bridge.fast_desk.risk.engine import FastRiskConfig
 from heuristic_mt5_bridge.fast_desk.setup import FastSetupConfig
 from heuristic_mt5_bridge.fast_desk.state.desk_state import SymbolDeskState
+from heuristic_mt5_bridge.fast_desk.correlation.policy import FastCorrelationPolicy
 from heuristic_mt5_bridge.fast_desk.trader import FastTraderConfig, FastTraderService
 from heuristic_mt5_bridge.fast_desk.trigger import FastTriggerConfig
 
@@ -71,6 +72,7 @@ class FastSymbolWorker:
         pending_config: FastPendingPolicyConfig | None = None,
         custody_config: FastCustodyPolicyConfig | None = None,
         trader_config: FastTraderConfig | None = None,
+        correlation_policy: FastCorrelationPolicy | None = None,
         mt5_call_ref: Callable | None = None,
         allow_entries: bool = True,
         transient_custody_symbol: bool = False,
@@ -91,6 +93,7 @@ class FastSymbolWorker:
             trigger_config=trigger_config or FastTriggerConfig(),
             pending_config=pending_config or FastPendingPolicyConfig(),
             custody_config=custody_config or FastCustodyPolicyConfig(),
+            correlation_policy=correlation_policy,
         )
 
         state = SymbolDeskState()

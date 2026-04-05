@@ -38,6 +38,7 @@ from heuristic_mt5_bridge.infra.storage.runtime_db import (
     replace_order_cache,
     replace_position_cache,
 )
+from heuristic_mt5_bridge.core.correlation import CorrelationService
 from heuristic_mt5_bridge.shared.symbols.universe import is_operable_symbol, normalize_symbol
 from heuristic_mt5_bridge.shared.time.utc import utc_now_iso
 
@@ -57,6 +58,18 @@ def _csv_values(raw: str, *, upper: bool = False) -> list[str]:
             continue
         values.append(value.upper() if upper else value)
     return values
+
+
+def _ensure_timeframes(timeframes: list[str], required: list[str]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in list(timeframes) + list(required):
+        value = str(item).strip().upper()
+        if not value or value in seen:
+            continue
+        ordered.append(value)
+        seen.add(value)
+    return ordered
 
 
 @dataclass
@@ -85,6 +98,13 @@ class CoreRuntimeConfig:
     indicator_enabled: bool
     indicator_stale_after_seconds: int
     indicator_common_files_root: str
+    correlation_enabled: bool
+    correlation_refresh_seconds: float
+    correlation_window_bars: int
+    correlation_min_coverage_bars: int
+    correlation_return_type: str
+    correlation_stale_source_seconds: float
+    correlation_timeframes: list[str]
 
     @classmethod
     def load(cls, repo_root: Path) -> "CoreRuntimeConfig":
@@ -118,6 +138,13 @@ class CoreRuntimeConfig:
             indicator_enabled=_parse_bool(getenv("INDICATOR_ENRICHMENT_ENABLED", env_values, "false"), False),
             indicator_stale_after_seconds=int(getenv("INDICATOR_ENRICHMENT_STALE_AFTER_SECONDS", env_values, "180")),
             indicator_common_files_root=getenv("MT5_COMMON_FILES_ROOT", env_values, "").strip(),
+            correlation_enabled=_parse_bool(getenv("CORRELATION_ENABLED", env_values, "false"), False),
+            correlation_refresh_seconds=float(getenv("CORRELATION_REFRESH_SECONDS", env_values, "60")),
+            correlation_window_bars=int(getenv("CORRELATION_WINDOW_BARS", env_values, "50")),
+            correlation_min_coverage_bars=int(getenv("CORRELATION_MIN_COVERAGE_BARS", env_values, "30")),
+            correlation_return_type=getenv("CORRELATION_RETURN_TYPE", env_values, "simple").strip().lower(),
+            correlation_stale_source_seconds=float(getenv("CORRELATION_STALE_SOURCE_SECONDS", env_values, "300")),
+            correlation_timeframes=_csv_values(getenv("CORRELATION_TIMEFRAMES", env_values, "M5,H1"), upper=True),
         )
 
 
@@ -185,6 +212,19 @@ class CoreRuntimeService:
         self._smc_desk: Any = None   # Optional[SmcDeskService] — set via attach_smc_desk()
         self._fast_desk: Any = None   # Optional[FastDeskService] — set via attach_fast_desk()
 
+        self.correlation_service: CorrelationService | None = None
+        if config.correlation_enabled:
+            self.correlation_service = CorrelationService(
+                market_state=self.market_state,
+                subscription_manager=self.subscription_manager,
+                window_bars=config.correlation_window_bars,
+                min_coverage_bars=config.correlation_min_coverage_bars,
+                return_type=config.correlation_return_type,
+                refresh_seconds=config.correlation_refresh_seconds,
+                stale_source_seconds=config.correlation_stale_source_seconds,
+                timeframes=config.correlation_timeframes,
+            )
+
         # Per-symbol desk assignments: symbol -> set of desks ("fast", "smc")
         # Default: subscribed symbols get both desks enabled when both desks are attached.
         self.symbol_desk_assignments: dict[str, set[str]] = {}
@@ -207,6 +247,7 @@ class CoreRuntimeService:
             "market_state": "starting",
             "broker_sessions": "starting" if config.sessions_enabled else "disabled",
             "indicator_bridge": "inactive" if not config.indicator_enabled else "waiting_first_snapshot",
+            "correlation": "enabled" if config.correlation_enabled else "disabled",
             "updated_at": utc_now_iso(),
         }
 
@@ -708,6 +749,13 @@ class CoreRuntimeService:
             return getattr(self._smc_desk, "_analyst_config", None)
         return None
 
+    @property
+    def smc_trader_config(self) -> Any:
+        """Return SmcTraderConfig from the attached desk, or None."""
+        if self._smc_desk is not None:
+            return getattr(self._smc_desk, "_trader_config", None)
+        return None
+
     # ── Per-symbol desk assignments ────────────────────────────────────────────
     def _default_desks(self) -> set[str]:
         """Return the set of desks that are attached (used as default for new subscriptions)."""
@@ -951,6 +999,10 @@ class CoreRuntimeService:
                                     metadata={"side": side, "signal_id": signal_id},
                                 ) if self.ownership_registry is not None else []
                             ),
+                            connector=self.connector,
+                            account_payload_ref=lambda: self.account_payload,
+                            ownership_open_ref=lambda: self.ownership_open_for_desk(desk="smc"),
+                            mt5_call_ref=self._mt5_call,
                         ),
                         name="smc_desk",
                     )
@@ -976,6 +1028,11 @@ class CoreRuntimeService:
                             mt5_call_ref=self._mt5_call,
                         ),
                         name="fast_desk",
+                    )
+                if self.correlation_service is not None:
+                    tg.create_task(
+                        self.correlation_service.refresh_loop(),
+                        name="correlation",
                     )
                 await self._stop_event.wait()
         finally:
@@ -1047,27 +1104,30 @@ class CoreRuntimeService:
 
 async def build_runtime_service(repo_root: Path) -> CoreRuntimeService:
     config = CoreRuntimeConfig.load(repo_root)
-    service = CoreRuntimeService(config=config)
-
     # Use load_env_file + getenv so values from .env are honoured even when
     # they have not been injected into os.environ by the caller.
     env_values = load_env_file(repo_root / ".env")
 
     smc_enabled = _parse_bool(getenv("SMC_SCANNER_ENABLED", env_values, "false"), False)
-    if smc_enabled:
-        from heuristic_mt5_bridge.smc_desk.runtime import create_smc_desk_service  # noqa: PLC0415
-
-        smc_desk = create_smc_desk_service(config.runtime_db_path)
-        service.attach_smc_desk(smc_desk)
-
     fast_enabled = _parse_bool(
         getenv("FAST_DESK_ENABLED", env_values, getenv("FAST_TRADER_ENABLED", env_values, "false")),
         False,
     )
     if fast_enabled:
+        # Fast Desk evaluates M1/M5/M30 on every scan cycle, so those feeds must
+        # be present even when the env file was configured for other desks first.
+        config.watch_timeframes = _ensure_timeframes(config.watch_timeframes, ["M1", "M5", "M30"])
+
+    service = CoreRuntimeService(config=config)
+    if smc_enabled:
+        from heuristic_mt5_bridge.smc_desk.runtime import create_smc_desk_service  # noqa: PLC0415
+
+        smc_desk = create_smc_desk_service(config.runtime_db_path, correlation_service=service.correlation_service)
+        service.attach_smc_desk(smc_desk)
+    if fast_enabled:
         from heuristic_mt5_bridge.fast_desk.runtime import create_fast_desk_service  # noqa: PLC0415
 
-        fast_desk = create_fast_desk_service(config.runtime_db_path)
+        fast_desk = create_fast_desk_service(config.runtime_db_path, correlation_service=service.correlation_service)
         service.attach_fast_desk(fast_desk)
 
     return service

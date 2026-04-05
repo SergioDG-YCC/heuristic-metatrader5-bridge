@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from heuristic_mt5_bridge.core.runtime.service import CoreRuntimeConfig, CoreRuntimeService
+from heuristic_mt5_bridge.core.runtime.service import CoreRuntimeConfig, CoreRuntimeService, build_runtime_service
 
 
 def _iso(dt: datetime) -> str:
@@ -48,6 +48,9 @@ class FakeConnector:
             "terminal_name": "MT5",
             "terminal_path": "",
         }
+
+    def fetch_available_symbol_count(self) -> int:
+        return len(self.catalog_symbols)
 
     def fetch_available_symbol_catalog(self) -> list[dict[str, Any]]:
         now = _iso(datetime.now(timezone.utc))
@@ -308,10 +311,29 @@ def _build_config(
         indicator_enabled=True,
         indicator_stale_after_seconds=180,
         indicator_common_files_root="",
+        correlation_enabled=False,
+        correlation_refresh_seconds=60.0,
+        correlation_window_bars=50,
+        correlation_min_coverage_bars=30,
+        correlation_return_type="simple",
+        correlation_stale_source_seconds=300.0,
+        correlation_timeframes=["M5", "H1"],
     )
 
 
 class CoreRuntimeServiceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_build_runtime_service_adds_fast_required_timeframes(self) -> None:
+        tmp_path = Path(tempfile.mkdtemp())
+        try:
+            (tmp_path / ".env").write_text(
+                "MT5_WATCH_TIMEFRAMES=M1,M5,H1,H4,D1\nFAST_DESK_ENABLED=true\n",
+                encoding="utf-8",
+            )
+            service = await build_runtime_service(tmp_path)
+            self.assertEqual(service.config.watch_timeframes, ["M1", "M5", "H1", "H4", "D1", "M30"])
+        finally:
+            shutil.rmtree(tmp_path, ignore_errors=True)
+
     async def test_bootstrap_persists_runtime_and_uses_env_subscriptions(self) -> None:
         tmp_path = Path(tempfile.mkdtemp())
         try:

@@ -384,6 +384,33 @@ def ensure_runtime_db(db_path: Path) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_smc_events_log_event_type ON smc_events_log(broker_server, account_login, event_type, created_at DESC)"
         )
+        # ------------------------------------------------------------------ SMC trader orders
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS smc_thesis_orders (
+                broker_server TEXT NOT NULL,
+                account_login INTEGER NOT NULL,
+                thesis_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                mt5_order_id INTEGER,
+                mt5_position_id INTEGER,
+                operation_type TEXT NOT NULL DEFAULT 'order',
+                side TEXT NOT NULL,
+                entry_price REAL,
+                stop_loss REAL,
+                take_profit REAL,
+                volume REAL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                mapped_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (broker_server, account_login, thesis_id, symbol)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_smc_thesis_orders_symbol "
+            "ON smc_thesis_orders(broker_server, account_login, symbol, status)"
+        )
         # ------------------------------------------------------------------ Fast desk
         conn.execute(
             """

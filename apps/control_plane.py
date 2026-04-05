@@ -100,6 +100,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global _service, _runtime_task
     repo_root = Path(repo_root_from(__file__))
     env_values = load_env_file(repo_root / ".env") or {}
+
+    # Inject .env values into os.environ so that all modules using os.getenv()
+    # (e.g. SmcTraderConfig.from_env) honour the .env file without requiring
+    # an external dotenv loader.  os.environ takes precedence: only set if the
+    # key is not already present.
+    for key, value in env_values.items():
+        os.environ.setdefault(key, value)
+
     host = getenv("CONTROL_PLANE_HOST", env_values, "0.0.0.0").strip() or "0.0.0.0"
     port = int(getenv("CONTROL_PLANE_PORT", env_values, "8765"))
 
@@ -256,6 +264,21 @@ class SMCConfigUpdateRequest(BaseModel):
     llm_temperature: float | None = None
     spread_tolerance: str | None = None
     spread_thresholds: dict[str, dict[str, float]] | None = None
+
+
+class SMCTraderConfigUpdateRequest(BaseModel):
+    enabled: bool | None = None
+    min_quality: str | None = None
+    pending_ttl_seconds: int | None = None
+    custody_interval_seconds: float | None = None
+    max_positions_per_symbol: int | None = None
+    max_positions_total: int | None = None
+    risk_per_trade_percent: float | None = None
+    max_lot_size: float | None = None
+    scale_out_pct: float | None = None
+    min_rr_ratio: float | None = None
+    bias_change_cooldown_seconds: float | None = None
+    entry_zone_buffer_pips: float | None = None
 
 
 class FastConfigUpdateRequest(BaseModel):
@@ -660,6 +683,77 @@ async def update_smc_config(req: SMCConfigUpdateRequest) -> dict[str, Any]:
         "status": "success",
         "config": svc.smc_desk_config.to_dict() if hasattr(svc.smc_desk_config, "to_dict") else update_data,
         "message": "SMC configuration updated (runtime only, restart to persist to .env)",
+    }
+
+
+@app.get("/api/v1/config/smc/trader")
+async def get_smc_trader_config() -> dict[str, Any]:
+    """Get current SMC Trader configuration."""
+    svc = _require_service()
+    trader_cfg = getattr(svc, "smc_trader_config", None)
+    if trader_cfg is not None:
+        from dataclasses import asdict
+        return {"status": "success", "config": asdict(trader_cfg)}
+
+    from heuristic_mt5_bridge.smc_desk.trader.config import SmcTraderConfig
+    return {"status": "success", "config": SmcTraderConfig.from_env().__dict__}
+
+
+@app.put("/api/v1/config/smc/trader")
+async def update_smc_trader_config(req: SMCTraderConfigUpdateRequest) -> dict[str, Any]:
+    """Update SMC Trader configuration at runtime."""
+    svc = _require_service()
+
+    if req.min_quality is not None and req.min_quality not in ("low", "medium", "high"):
+        raise HTTPException(status_code=422, detail="min_quality must be 'low', 'medium', or 'high'")
+    if req.max_positions_per_symbol is not None and req.max_positions_per_symbol < 1:
+        raise HTTPException(status_code=422, detail="max_positions_per_symbol must be >= 1")
+    if req.max_positions_total is not None and req.max_positions_total < 1:
+        raise HTTPException(status_code=422, detail="max_positions_total must be >= 1")
+    if req.risk_per_trade_percent is not None and (req.risk_per_trade_percent <= 0 or req.risk_per_trade_percent > 5.0):
+        raise HTTPException(status_code=422, detail="risk_per_trade_percent must be in (0, 5.0]")
+
+    trader_cfg = getattr(svc, "smc_trader_config", None)
+    _SMC_TRADER_ENV_MAP = {
+        "enabled": "SMC_TRADER_ENABLED",
+        "min_quality": "SMC_TRADER_MIN_QUALITY",
+        "pending_ttl_seconds": "SMC_TRADER_PENDING_TTL_SECONDS",
+        "custody_interval_seconds": "SMC_TRADER_CUSTODY_INTERVAL_SECONDS",
+        "max_positions_per_symbol": "SMC_TRADER_MAX_POSITIONS_PER_SYMBOL",
+        "max_positions_total": "SMC_TRADER_MAX_POSITIONS_TOTAL",
+        "risk_per_trade_percent": "SMC_TRADER_RISK_PER_TRADE_PCT",
+        "max_lot_size": "SMC_TRADER_MAX_LOT_SIZE",
+        "scale_out_pct": "SMC_TRADER_SCALE_OUT_PCT",
+        "min_rr_ratio": "SMC_TRADER_MIN_RR_RATIO",
+        "bias_change_cooldown_seconds": "SMC_TRADER_BIAS_CHANGE_COOLDOWN_SECONDS",
+        "entry_zone_buffer_pips": "SMC_TRADER_ENTRY_ZONE_BUFFER_PIPS",
+    }
+
+    update_data = {k: v for k, v in req.model_dump().items() if v is not None}
+
+    if trader_cfg is not None:
+        for key, value in update_data.items():
+            if hasattr(trader_cfg, key):
+                setattr(trader_cfg, key, value)
+        # Also propagate to entry_policy config
+        smc_desk = getattr(svc, "_smc_desk", None)
+        if smc_desk is not None:
+            trader_svc = getattr(smc_desk, "_trader", None)
+            if trader_svc is not None:
+                trader_svc.config = trader_cfg
+                trader_svc.entry_policy._config = trader_cfg
+
+    for field, env_key in _SMC_TRADER_ENV_MAP.items():
+        value = update_data.get(field)
+        if value is not None:
+            os.environ[env_key] = str(value).lower() if isinstance(value, bool) else str(value)
+
+    from dataclasses import asdict
+    result_cfg = asdict(trader_cfg) if trader_cfg is not None else update_data
+    return {
+        "status": "success",
+        "config": result_cfg,
+        "message": "SMC Trader configuration updated (runtime only, restart to persist to .env)",
     }
 
 
@@ -1280,6 +1374,28 @@ async def fast_activity_symbol(symbol: str, limit: int = 50) -> dict[str, Any]:
     }
 
 
+@app.get("/api/v1/fast/zones")
+async def fast_zones(symbol: str | None = None) -> dict[str, Any]:
+    """Latest FAST-detected local reaction zones captured from recent scan cycles."""
+    from heuristic_mt5_bridge.fast_desk import activity_log
+    if symbol:
+        snapshot = activity_log.zone_snapshot(symbol.upper())
+        return {
+            "status": "success",
+            "symbol": symbol.upper(),
+            "zones": snapshot.get("zones", []),
+            "updated_at": snapshot.get("updated_at", utc_now_iso()),
+        }
+    items = activity_log.zone_snapshots(limit=200)
+    zones: list[dict[str, Any]] = []
+    updated_at = utc_now_iso()
+    if items:
+        updated_at = str(items[0].get("updated_at", updated_at))
+    for item in items:
+        zones.extend(item.get("zones", []))
+    return {"status": "success", "zones": zones, "updated_at": updated_at}
+
+
 @app.get("/api/v1/fast/signals")
 async def fast_signals(limit: int = 50) -> dict[str, Any]:
     """Recent Fast Desk signals from DB (those that reached execution)."""
@@ -1332,6 +1448,78 @@ async def fast_trade_log(limit: int = 50) -> dict[str, Any]:
     except Exception as e:
         events = [{"error": str(e)}]
     return {"status": "success", "events": events, "updated_at": utc_now_iso()}
+
+
+# ---------------------------------------------------------------------------
+# Correlation Engine
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/correlation/{timeframe}")
+async def get_correlation_matrix(timeframe: str) -> dict[str, Any]:
+    """Return the current cached correlation matrix for a timeframe.
+
+    ``timeframe`` is case-insensitive (e.g. ``M5``, ``H1``).  Returns 503
+    while the engine is disabled or before the first refresh cycle completes.
+    """
+    svc = _require_service()
+    if svc.correlation_service is None:
+        raise HTTPException(status_code=503, detail="Correlation engine disabled (CORRELATION_ENABLED=false)")
+    tf = timeframe.upper()
+    matrix = svc.correlation_service.get_matrix(tf)
+    if matrix is None:
+        raise HTTPException(status_code=503, detail=f"Matrix for {tf} not yet computed (wait for first refresh cycle)")
+    pairs_out: list[dict[str, Any]] = []
+    for (sym_a, sym_b), pair in sorted(matrix.pairs.items()):
+        pairs_out.append({
+            "symbol_a": sym_a,
+            "symbol_b": sym_b,
+            "coefficient": pair.coefficient,
+            "bars_used": pair.bars_used,
+            "coverage_ratio": pair.coverage_ratio,
+            "coverage_ok": pair.coverage_ok,
+            "source_stale": pair.source_stale,
+            "computed_at": pair.computed_at,
+        })
+    return {
+        "status": "success",
+        "timeframe": tf,
+        "pairs": pairs_out,
+        "pair_count": len(pairs_out),
+        "min_pair_bars": matrix.min_pair_bars,
+        "all_pairs_coverage_ok": matrix.all_pairs_coverage_ok,
+        "computed_at": matrix.computed_at,
+        "symbols": svc.correlation_service.active_symbols(),
+    }
+
+
+@app.get("/api/v1/correlation/{timeframe}/{symbol_a}/{symbol_b}")
+async def get_correlation_pair(
+    timeframe: str,
+    symbol_a: str,
+    symbol_b: str,
+) -> dict[str, Any]:
+    """Return the cached correlation value for a specific pair on a timeframe."""
+    svc = _require_service()
+    if svc.correlation_service is None:
+        raise HTTPException(status_code=503, detail="Correlation engine disabled")
+    pair = svc.correlation_service.get_pair(symbol_a.upper(), symbol_b.upper(), timeframe.upper())
+    if pair is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Pair {symbol_a.upper()}-{symbol_b.upper()} not found for {timeframe.upper()}",
+        )
+    return {
+        "status": "success",
+        "symbol_a": pair.symbol_a,
+        "symbol_b": pair.symbol_b,
+        "timeframe": pair.timeframe,
+        "coefficient": pair.coefficient,
+        "bars_used": pair.bars_used,
+        "coverage_ratio": pair.coverage_ratio,
+        "coverage_ok": pair.coverage_ok,
+        "source_stale": pair.source_stale,
+        "computed_at": pair.computed_at,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ import Ownership from "./routes/Ownership";
 import Mode from "./routes/Mode";
 import Settings from "./routes/Settings";
 import Symbols from "./routes/Symbols";
+import Correlation from "./routes/Correlation";
 
 import "./styles/global.css";
 
@@ -92,6 +93,7 @@ const App: Component = () => (
     <Route path="/mode" component={Mode} />
     <Route path="/symbols" component={Symbols} />
     <Route path="/settings" component={Settings} />
+    <Route path="/correlation" component={Correlation} />
   </Router>
 );
 

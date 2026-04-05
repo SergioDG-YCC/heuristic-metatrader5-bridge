@@ -25,7 +25,7 @@ class FastTriggerDecision:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-_STRONG_TRIGGERS = frozenset({"micro_bos", "displacement", "reclaim"})
+_STRONG_TRIGGERS = frozenset({"micro_bos", "displacement", "reclaim", "zone_reclaim", "zone_sweep_reclaim"})
 
 
 class FastTriggerEngine:
@@ -118,14 +118,22 @@ class FastTriggerEngine:
         low = float(last.get("low", 0.0) or 0.0)
         if min(open_price, close, high, low) <= 0:
             return FastTriggerDecision(False, "rejection_candle", 0.0, "invalid_candle")
+        zone_top = float(setup.metadata.get("zone_top", 0.0) or 0.0)
+        zone_bottom = float(setup.metadata.get("zone_bottom", 0.0) or 0.0)
+        zone_reaction = bool(setup.metadata.get("zone_reaction"))
+        trigger_name = "zone_rejection_candle" if zone_reaction else "rejection_candle"
+        if zone_reaction and zone_top > 0 and zone_bottom > 0:
+            touched_zone = not (high < zone_bottom or low > zone_top)
+            if not touched_zone:
+                return FastTriggerDecision(False, trigger_name, 0.0, "trigger_outside_zone")
         body = abs(close - open_price)
         upper_wick = max(0.0, high - max(open_price, close))
         lower_wick = max(0.0, min(open_price, close) - low)
         if setup.side == "buy" and close > open_price and lower_wick > body * 1.25:
-            return FastTriggerDecision(True, "rejection_candle", 0.72, "bullish_rejection")
+            return FastTriggerDecision(True, trigger_name, 0.78 if zone_reaction else 0.72, "bullish_rejection")
         if setup.side == "sell" and close < open_price and upper_wick > body * 1.25:
-            return FastTriggerDecision(True, "rejection_candle", 0.72, "bearish_rejection")
-        return FastTriggerDecision(False, "rejection_candle", 0.0, "no_rejection")
+            return FastTriggerDecision(True, trigger_name, 0.78 if zone_reaction else 0.72, "bearish_rejection")
+        return FastTriggerDecision(False, trigger_name, 0.0, "no_rejection")
 
     @staticmethod
     def _reclaim(setup: FastSetup, candles: list[dict[str, Any]]) -> FastTriggerDecision:
@@ -134,11 +142,12 @@ class FastTriggerEngine:
             return FastTriggerDecision(False, "reclaim", 0.0, "missing_level")
         prev_close = float(candles[-2].get("close", 0.0) or 0.0)
         close = float(candles[-1].get("close", 0.0) or 0.0)
+        trigger_name = "zone_reclaim" if bool(setup.metadata.get("zone_reaction")) else "reclaim"
         if setup.side == "buy" and prev_close < level <= close:
-            return FastTriggerDecision(True, "reclaim", 0.74, "bullish_reclaim")
+            return FastTriggerDecision(True, trigger_name, 0.82 if trigger_name == "zone_reclaim" else 0.74, "bullish_reclaim")
         if setup.side == "sell" and prev_close > level >= close:
-            return FastTriggerDecision(True, "reclaim", 0.74, "bearish_reclaim")
-        return FastTriggerDecision(False, "reclaim", 0.0, "no_reclaim")
+            return FastTriggerDecision(True, trigger_name, 0.82 if trigger_name == "zone_reclaim" else 0.74, "bearish_reclaim")
+        return FastTriggerDecision(False, trigger_name, 0.0, "no_reclaim")
 
     def _displacement(self, setup: FastSetup, candles: list[dict[str, Any]]) -> FastTriggerDecision:
         sample = candles[-12:]
@@ -150,6 +159,7 @@ class FastTriggerEngine:
         if avg_body <= 0:
             return FastTriggerDecision(False, "displacement", 0.0, "avg_body_zero")
         direction = "buy" if float(last.get("close", 0.0) or 0.0) > float(last.get("open", 0.0) or 0.0) else "sell"
+        trigger_name = "zone_sweep_reclaim" if bool(setup.metadata.get("zone_reaction")) else "displacement"
         if body >= avg_body * float(self.config.displacement_body_factor) and direction == setup.side:
-            return FastTriggerDecision(True, "displacement", 0.81, "m1_displacement")
-        return FastTriggerDecision(False, "displacement", 0.0, "no_displacement")
+            return FastTriggerDecision(True, trigger_name, 0.84 if trigger_name == "zone_sweep_reclaim" else 0.81, "m1_displacement")
+        return FastTriggerDecision(False, trigger_name, 0.0, "no_displacement")

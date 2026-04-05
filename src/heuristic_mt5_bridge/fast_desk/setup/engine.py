@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from heuristic_mt5_bridge.smc_desk.detection.fair_value_gaps import detect_fair_value_gaps
 from heuristic_mt5_bridge.smc_desk.detection.liquidity import detect_liquidity_pools, detect_sweeps
 from heuristic_mt5_bridge.smc_desk.detection.order_blocks import detect_order_blocks
 from heuristic_mt5_bridge.smc_desk.detection.structure import detect_market_structure
@@ -65,6 +66,7 @@ class FastSetupEngine:
         pip_size: float,
         h1_bias: str,
         spread_pips: float = 0.0,
+        htf_zones: list[dict[str, Any]] | None = None,
         # Backward compat alias
         candles_h1: list[dict[str, Any]] | None = None,
     ) -> list[FastSetup]:
@@ -100,7 +102,20 @@ class FastSetupEngine:
             self._order_block_retest(
                 symbol=symbol,
                 candles_m5=candles_m5,
+                candles_htf=htf,
                 structure_m5=structure_m5,
+                structure_htf=structure_htf,
+                latest_close=latest_close,
+                atr=atr,
+                pip_size=pip_size,
+                rr=cfg.rr_ratio,
+            )
+        )
+        setups.extend(
+            self._fvg_reaction(
+                symbol=symbol,
+                candles_m5=candles_m5,
+                candles_htf=htf,
                 latest_close=latest_close,
                 atr=atr,
                 pip_size=pip_size,
@@ -160,7 +175,11 @@ class FastSetupEngine:
         # Phase 4: Bias alignment penalty (soft, not blocking)
         for s in filtered:
             if h1_bias in {"buy", "sell"} and s.side != h1_bias:
-                s.confidence = round(s.confidence * 0.75, 4)
+                penalty = 0.88 if bool(s.metadata.get("zone_reaction")) else 0.75
+                s.confidence = round(s.confidence * penalty, 4)
+
+        for s in filtered:
+            self._apply_htf_zone_context(s, htf_zones or [], latest_close)
 
         # Re-apply min_confidence after all penalties
         filtered = [s for s in filtered if s.confidence >= cfg.min_confidence]
@@ -209,21 +228,276 @@ class FastSetupEngine:
         )
         return filtered
 
+    def enumerate_zones(
+        self,
+        *,
+        symbol: str,
+        candles_m1: list[dict[str, Any]],
+        candles_m5: list[dict[str, Any]],
+        candles_htf: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        zones: list[dict[str, Any]] = []
+
+        series_m1 = candles_m1[-220:]
+        series_m5 = candles_m5[-220:]
+        series_m30 = candles_htf[-220:]
+        if len(series_m1) < 30 or len(series_m5) < 40 or len(series_m30) < 40:
+            return []
+
+        structure_m1 = detect_market_structure(series_m1[-180:], window=3)
+        structure_m5 = detect_market_structure(series_m5[-180:], window=3)
+        structure_m30 = detect_market_structure(series_m30[-180:], window=3)
+
+        zones.extend(self._enumerate_zones_for_series(
+            symbol=symbol,
+            timeframe_origin="M1",
+            candles=series_m1,
+            structure=structure_m1,
+            liquidity_higher=series_m5,
+            liquidity_structure=structure_m5,
+        ))
+        zones.extend(self._enumerate_zones_for_series(
+            symbol=symbol,
+            timeframe_origin="M5",
+            candles=series_m5,
+            structure=structure_m5,
+            liquidity_higher=series_m30,
+            liquidity_structure=structure_m30,
+        ))
+        zones.extend(self._enumerate_zones_for_series(
+            symbol=symbol,
+            timeframe_origin="M30",
+            candles=series_m30,
+            structure=structure_m30,
+            liquidity_higher=series_m30,
+            liquidity_structure=structure_m30,
+        ))
+
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, float, float]] = set()
+        for zone in zones:
+            key = (
+                str(zone.get("timeframe_origin", "")),
+                str(zone.get("zone_type", "")),
+                round(float(zone.get("price_low", 0.0) or 0.0), 6),
+                round(float(zone.get("price_high", 0.0) or 0.0), 6),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(zone)
+
+        return deduped
+
+    @staticmethod
+    def _display_timeframes_for_origin(timeframe_origin: str) -> list[str]:
+        tf = str(timeframe_origin or "").upper()
+        if tf == "M1":
+            return ["M1"]
+        if tf == "M5":
+            return ["M1", "M5"]
+        return ["M1", "M5", "M30"]
+
+    def _enumerate_zones_for_series(
+        self,
+        *,
+        symbol: str,
+        timeframe_origin: str,
+        candles: list[dict[str, Any]],
+        structure: dict[str, Any],
+        liquidity_higher: list[dict[str, Any]],
+        liquidity_structure: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        zones: list[dict[str, Any]] = []
+
+        for zone in detect_order_blocks(candles, structure, min_impulse_candles=3, max_zones=8):
+            if bool(zone.get("mitigated", False)):
+                continue
+            item = self._zone_snapshot_from_detection(
+                symbol=symbol,
+                timeframe_origin=timeframe_origin,
+                zone=zone,
+                status="active",
+            )
+            if item is not None:
+                zones.append(item)
+
+        for zone in detect_fair_value_gaps(candles, max_zones=10):
+            if bool(zone.get("mitigated", False)):
+                continue
+            item = self._zone_snapshot_from_detection(
+                symbol=symbol,
+                timeframe_origin=timeframe_origin,
+                zone=zone,
+                status="active",
+            )
+            if item is not None:
+                zones.append(item)
+
+        liquidity = detect_liquidity_pools(
+            liquidity_higher[-180:],
+            candles[-200:],
+            structure=liquidity_structure,
+            max_zones=10,
+        )
+        sweeps = detect_sweeps(candles[-200:], liquidity, lookback=80)
+
+        for zone in liquidity:
+            if bool(zone.get("taken", False)):
+                continue
+            item = self._zone_snapshot_from_detection(
+                symbol=symbol,
+                timeframe_origin=timeframe_origin,
+                zone=zone,
+                status="active",
+            )
+            if item is not None:
+                zones.append(item)
+
+        for zone in sweeps[:6]:
+            item = self._zone_snapshot_from_detection(
+                symbol=symbol,
+                timeframe_origin=timeframe_origin,
+                zone=zone,
+                status="swept",
+            )
+            if item is not None:
+                zones.append(item)
+
+        return zones
+
+    def _zone_snapshot_from_detection(
+        self,
+        *,
+        symbol: str,
+        timeframe_origin: str,
+        zone: dict[str, Any],
+        status: str,
+    ) -> dict[str, Any] | None:
+        top = float(zone.get("price_high", 0.0) or 0.0)
+        bottom = float(zone.get("price_low", 0.0) or 0.0)
+        if top <= 0 or bottom <= 0:
+            return None
+        zone_type = str(zone.get("zone_type", "") or "zone")
+        return {
+            "symbol": symbol.upper(),
+            "source": "fast",
+            "zone_type": zone_type,
+            "side": self._zone_side(zone_type),
+            "timeframe_origin": str(timeframe_origin).upper(),
+            "display_timeframes": self._display_timeframes_for_origin(timeframe_origin),
+            "price_low": round(min(bottom, top), 10),
+            "price_high": round(max(bottom, top), 10),
+            "status": status,
+            "origin_time": str(zone.get("origin_candle_time") or zone.get("sweep_candle_time") or ""),
+            "origin_index": int(zone.get("origin_index", zone.get("sweep_index", 0)) or 0),
+            "kind": "zone",
+        }
+
+    @staticmethod
+    def _zone_side(zone_type: str) -> str:
+        z = str(zone_type or "").lower()
+        if any(token in z for token in ("bull", "ssl", "equal_lows")):
+            return "buy"
+        if any(token in z for token in ("bear", "bsl", "equal_highs")):
+            return "sell"
+        return "neutral"
+
+    def _apply_htf_zone_context(
+        self,
+        setup: FastSetup,
+        htf_zones: list[dict[str, Any]],
+        current_price: float,
+    ) -> None:
+        if not htf_zones:
+            setup.metadata["htf_zone_state"] = "neutral"
+            return
+        nearest: tuple[float, dict[str, Any]] | None = None
+        for zone in htf_zones:
+            if not isinstance(zone, dict):
+                continue
+            top = float(zone.get("price_high", 0.0) or zone.get("high", 0.0) or 0.0)
+            bottom = float(zone.get("price_low", 0.0) or zone.get("low", 0.0) or 0.0)
+            if top <= 0 or bottom <= 0:
+                continue
+            mid = (top + bottom) / 2.0
+            dist = abs(mid - current_price)
+            if nearest is None or dist < nearest[0]:
+                nearest = (dist, zone)
+        if nearest is None:
+            setup.metadata["htf_zone_state"] = "neutral"
+            return
+        zone = nearest[1]
+        zone_side = str(zone.get("side") or self._zone_side(str(zone.get("zone_type", ""))))
+        state = "neutral"
+        if zone_side in {"buy", "sell"}:
+            state = "confluence" if zone_side == setup.side else "conflict"
+        setup.metadata["htf_zone_state"] = state
+        setup.metadata["htf_zone_side"] = zone_side
+        setup.metadata["htf_zone_type"] = str(zone.get("zone_type", ""))
+        if state == "confluence":
+            setup.confidence = round(min(0.99, setup.confidence * 1.08), 4)
+        elif state == "conflict":
+            setup.confidence = round(setup.confidence * 0.90, 4)
+
     def _order_block_retest(
         self,
         *,
         symbol: str,
         candles_m5: list[dict[str, Any]],
+        candles_htf: list[dict[str, Any]],
         structure_m5: dict[str, Any],
+        structure_htf: dict[str, Any],
         latest_close: float,
         atr: float,
         pip_size: float,
         rr: float,
     ) -> list[FastSetup]:
-        zones = detect_order_blocks(candles_m5[-180:], structure_m5, min_impulse_candles=3, max_zones=6)
+        setups: list[FastSetup] = []
+        setups.extend(
+            self._order_block_retest_for_series(
+                symbol=symbol,
+                candles=candles_m5[-180:],
+                structure=structure_m5,
+                latest_close=latest_close,
+                atr=atr,
+                pip_size=pip_size,
+                rr=rr,
+                timeframe_origin="M5",
+                confidence=0.82,
+            )
+        )
+        setups.extend(
+            self._order_block_retest_for_series(
+                symbol=symbol,
+                candles=candles_htf[-180:],
+                structure=structure_htf,
+                latest_close=latest_close,
+                atr=atr,
+                pip_size=pip_size,
+                rr=rr,
+                timeframe_origin="M30",
+                confidence=0.85,
+            )
+        )
+        return setups
+
+    def _order_block_retest_for_series(
+        self,
+        *,
+        symbol: str,
+        candles: list[dict[str, Any]],
+        structure: dict[str, Any],
+        latest_close: float,
+        atr: float,
+        pip_size: float,
+        rr: float,
+        timeframe_origin: str,
+        confidence: float,
+    ) -> list[FastSetup]:
+        zones = detect_order_blocks(candles, structure, min_impulse_candles=3, max_zones=6)
         setups: list[FastSetup] = []
         tolerance = atr * 0.35
-        candle_slice = candles_m5[-180:]
         for zone in zones:
             top = float(zone.get("price_high", 0.0) or 0.0)
             bottom = float(zone.get("price_low", 0.0) or 0.0)
@@ -240,7 +514,7 @@ class FastSetupEngine:
             if origin_idx is not None:
                 origin_idx = int(origin_idx)
                 mitigated = False
-                for c in candle_slice[origin_idx + 2:]:
+                for c in candles[origin_idx + 2:]:
                     c_close = float(c.get("close", 0.0) or 0.0)
                     if bottom <= c_close <= top:
                         mitigated = True
@@ -249,6 +523,14 @@ class FastSetupEngine:
                     continue
 
             zone_type = str(zone.get("zone_type", ""))
+            metadata = {
+                "zone_type": zone_type,
+                "zone_origin": zone.get("origin_candle_time", ""),
+                "zone_reaction": True,
+                "zone_top": top,
+                "zone_bottom": bottom,
+                "timeframe_origin": timeframe_origin,
+            }
             if zone_type == "ob_bullish":
                 stop_loss = float(zone.get("wick_low", bottom) or bottom) - (atr * 0.2)
                 setups.append(
@@ -260,11 +542,11 @@ class FastSetupEngine:
                         stop_loss=stop_loss,
                         pip_size=pip_size,
                         rr=rr,
-                        confidence=0.82,
+                        confidence=confidence,
                         requires_pending=True,
                         pending_entry_type="limit",
                         retest_level=mid,
-                        metadata={"zone_type": zone_type, "zone_origin": zone.get("origin_candle_time", "")},
+                        metadata=metadata,
                     )
                 )
             elif zone_type == "ob_bearish":
@@ -278,16 +560,122 @@ class FastSetupEngine:
                         stop_loss=stop_loss,
                         pip_size=pip_size,
                         rr=rr,
-                        confidence=0.82,
+                        confidence=confidence,
                         requires_pending=True,
                         pending_entry_type="limit",
                         retest_level=mid,
-                        metadata={"zone_type": zone_type, "zone_origin": zone.get("origin_candle_time", "")},
+                        metadata=metadata,
                     )
                 )
             if setups:
                 break
         return setups
+
+    def _fvg_reaction(
+        self,
+        *,
+        symbol: str,
+        candles_m5: list[dict[str, Any]],
+        candles_htf: list[dict[str, Any]],
+        latest_close: float,
+        atr: float,
+        pip_size: float,
+        rr: float,
+    ) -> list[FastSetup]:
+        setups: list[FastSetup] = []
+        setups.extend(
+            self._fvg_reaction_for_series(
+                symbol=symbol,
+                candles=candles_m5[-180:],
+                latest_close=latest_close,
+                atr=atr,
+                pip_size=pip_size,
+                rr=rr,
+                timeframe_origin="M5",
+                confidence=0.80,
+            )
+        )
+        setups.extend(
+            self._fvg_reaction_for_series(
+                symbol=symbol,
+                candles=candles_htf[-180:],
+                latest_close=latest_close,
+                atr=atr,
+                pip_size=pip_size,
+                rr=rr,
+                timeframe_origin="M30",
+                confidence=0.83,
+            )
+        )
+        return setups
+
+    def _fvg_reaction_for_series(
+        self,
+        *,
+        symbol: str,
+        candles: list[dict[str, Any]],
+        latest_close: float,
+        atr: float,
+        pip_size: float,
+        rr: float,
+        timeframe_origin: str,
+        confidence: float,
+    ) -> list[FastSetup]:
+        fvgs = detect_fair_value_gaps(candles, max_zones=8)
+        tolerance = atr * 0.25
+        for zone in fvgs:
+            if bool(zone.get("mitigated", False)):
+                continue
+            top = float(zone.get("price_high", 0.0) or 0.0)
+            bottom = float(zone.get("price_low", 0.0) or 0.0)
+            if top <= 0 or bottom <= 0:
+                continue
+            if not ((bottom - tolerance) <= latest_close <= (top + tolerance)):
+                continue
+            zone_type = str(zone.get("zone_type", ""))
+            mid = (top + bottom) / 2.0
+            metadata = {
+                "zone_type": zone_type,
+                "zone_reaction": True,
+                "zone_top": top,
+                "zone_bottom": bottom,
+                "timeframe_origin": timeframe_origin,
+            }
+            if zone_type == "fvg_bullish":
+                return [
+                    self._make_setup(
+                        symbol=symbol,
+                        setup_type="fvg_reaction",
+                        side="buy",
+                        entry=mid,
+                        stop_loss=bottom - atr * 0.2,
+                        pip_size=pip_size,
+                        rr=rr,
+                        confidence=confidence,
+                        requires_pending=True,
+                        pending_entry_type="limit",
+                        retest_level=top,
+                        metadata=metadata,
+                    )
+                ]
+            if zone_type == "fvg_bearish":
+                return [
+                    self._make_setup(
+                        symbol=symbol,
+                        setup_type="fvg_reaction",
+                        side="sell",
+                        entry=mid,
+                        stop_loss=top + atr * 0.2,
+                        pip_size=pip_size,
+                        rr=rr,
+                        confidence=confidence,
+                        requires_pending=True,
+                        pending_entry_type="limit",
+                        retest_level=bottom,
+                        metadata=metadata,
+                    )
+                ]
+        return []
 
     def _liquidity_sweep_reclaim(
         self,
@@ -322,7 +710,14 @@ class FastSetupEngine:
                     requires_pending=False,
                     pending_entry_type="market",
                     retest_level=swept_level,
-                    metadata={"sweep_candle_time": sweep.get("sweep_candle_time", "")},
+                    metadata={
+                        "sweep_candle_time": sweep.get("sweep_candle_time", ""),
+                        "zone_reaction": True,
+                        "zone_type": zone_type,
+                        "zone_top": latest_close,
+                        "zone_bottom": float(sweep.get("price_low", latest_close - atr) or (latest_close - atr)),
+                        "timeframe_origin": "M5",
+                    },
                 )
             ]
         if zone_type == "sweep_bsl" and latest_close < swept_level and swept_level > 0:
@@ -339,7 +734,14 @@ class FastSetupEngine:
                     requires_pending=False,
                     pending_entry_type="market",
                     retest_level=swept_level,
-                    metadata={"sweep_candle_time": sweep.get("sweep_candle_time", "")},
+                    metadata={
+                        "sweep_candle_time": sweep.get("sweep_candle_time", ""),
+                        "zone_reaction": True,
+                        "zone_type": zone_type,
+                        "zone_top": float(sweep.get("price_high", latest_close + atr) or (latest_close + atr)),
+                        "zone_bottom": latest_close,
+                        "timeframe_origin": "M5",
+                    },
                 )
             ]
         return []

@@ -39,6 +39,7 @@ export default defineConfig({
       "/api/v1/fast": { target: "http://127.0.0.1:8765", changeOrigin: true },
       "/api/v1/smc": { target: "http://127.0.0.1:8765", changeOrigin: true },
       "/api/v1/symbols": { target: "http://127.0.0.1:8765", changeOrigin: true },
+      "/api/v1/correlation": { target: "http://127.0.0.1:8765", changeOrigin: true },
     },
   },
   build: {

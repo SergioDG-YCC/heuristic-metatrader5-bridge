@@ -128,6 +128,7 @@ graph TD
 | `OwnershipRegistry` | Persists operation ownership (`fast_owned`, `smc_owned`, `inherited_fast`), lifecycle transitions, reassignment, and history retention. |
 | `RiskKernel` | Central risk authority by broker/account with profiles `1..4`, desk allocator, effective limits, usage gates, and kill switch. |
 | `BrokerSessionsService` | Session window registry from MQL5 EA. Optional. |
+| `CorrelationService` | Computes Pearson cross-symbol correlation matrices per timeframe. Background loop, pure RAM. Optional (`CORRELATION_ENABLED=true`). |
 
 ### Fast Desk (`src/heuristic_mt5_bridge/fast_desk/`)
 
@@ -162,11 +163,28 @@ Slower prepared setups. Heuristic-first. LLM as optional final gate.
 | `validators/heuristic.py` | Confidence filter, min-confluence threshold, pip-size-aware checks |
 | `scanner/scanner.py` | `SmcScannerService` — iterates universe, runs full pipeline per symbol |
 | `analyst/heuristic_analyst.py` | Builds bias, scenario, invalidations, operation candidates |
-| `llm/validator.py` | Single-call LocalAI (Gemma 3 12B). Graceful fallback if disabled. |
+| `llm/validator.py` | Single-call LocalAI (Gemma 3 12B). `_LLM_GATE` lock ensures one call at a time. Graceful fallback if disabled. |
 | `state/thesis_store.py` | LRU cache (256) + SQLite. `load` / `save` / `list_symbols`. |
-| `runtime.py` | `SmcDeskService` — event queue + throttled analyst dispatch |
+| `runtime.py` | `SmcDeskService` — event queue + sequential analyst dispatch (one symbol at a time) |
 
 Enable: `SMC_SCANNER_ENABLED=true` | LLM: `SMC_LLM_ENABLED=true`
+
+### Correlation Engine (`src/heuristic_mt5_bridge/core/correlation/`)
+
+Optional. Enable via `CORRELATION_ENABLED=true`. Computes Pearson correlation between all subscribed-symbol pairs on one or more timeframes (default: M5, H1). Runs as a background loop every `CORRELATION_REFRESH_SECONDS` (default 60 s). Pure RAM — no disk writes.
+
+| Module | Role |
+|---|---|
+| `service.py` | `CorrelationService`: refresh loop, snapshot cache, public API (`get_matrix`, `get_pair`, `get_exposure_relations`, `active_symbols`) |
+| `models.py` | `CorrelationMatrixSnapshot`, `CorrelationPairValue` (with `source_stale` flag) |
+| `aligner.py` | Inner join by epoch, simple/log returns, minimum coverage guard |
+
+Desk integration:
+
+| Desk | Policy / Formatter | Timeframe | Effect |
+|---|---|---|---|
+| **Fast Desk** | `FastCorrelationPolicy` | M5 | Blocks entries when open positions create an implicit hedge or inverse concentration |
+| **SMC Desk** | `SmcCorrelationFormatter` | H1 | Injects top-5 correlated pairs into `analyst_input["correlation_context"]` and LLM prompt |
 
 ### Control Plane (`apps/control_plane.py`)
 
@@ -196,8 +214,8 @@ FastAPI server. The **only** external interface to runtime state.
 | `GET /risk/profile` | Active profile state and overrides |
 | `PUT /risk/profile` | Update profiles/overrides live |
 | `POST /risk/kill-switch/trip` | Trip kill switch (blocks new entries only) |
-| `POST /risk/kill-switch/reset` | Reset kill switch to armed state |
-
+| `POST /risk/kill-switch/reset` | Reset kill switch to armed state || `GET /api/v1/correlation/{tf}` | Full N×N Pearson matrix for timeframe (503 when engine disabled) |
+| `GET /api/v1/correlation/{tf}/{symbol_a}/{symbol_b}` | Single pair value with staleness flag |
 ---
 
 ## Environment variables
@@ -254,6 +272,15 @@ FAST_TRADER_PENDING_TTL_SECONDS=900
 FAST_TRADER_ALLOWED_SESSIONS=london,overlap,new_york
 FAST_TRADER_SPREAD_TOLERANCE=medium
 FAST_TRADER_MIN_RR=3.0
+
+# --- Correlation Engine ---
+CORRELATION_ENABLED=false
+CORRELATION_TIMEFRAMES=M5,H1
+CORRELATION_WINDOW_BARS=50
+CORRELATION_MIN_COVERAGE_BARS=30
+CORRELATION_RETURN_TYPE=simple
+CORRELATION_REFRESH_SECONDS=60
+CORRELATION_STALE_SOURCE_SECONDS=300
 
 # --- Ownership + Risk Kernel ---
 RISK_PROFILE_GLOBAL=2
@@ -316,6 +343,7 @@ src/heuristic_mt5_bridge/
       market_state.py    ← MarketStateService
       spec_registry.py   ← SymbolSpecRegistry
   fast_desk/
+    correlation/         ← FastCorrelationPolicy (implicit hedge + inverse concentration)
     signals/             ← FastScannerService
     risk/                ← FastRiskEngine
     policies/            ← FastEntryPolicy
@@ -325,6 +353,7 @@ src/heuristic_mt5_bridge/
     workers/             ← FastSymbolWorker
     runtime.py           ← FastDeskService
   smc_desk/
+    correlation/         ← SmcCorrelationFormatter (LLM context enrichment)
     detection/           ← 7 detectors
     validators/          ← HeuristicValidator
     scanner/             ← SmcScannerService

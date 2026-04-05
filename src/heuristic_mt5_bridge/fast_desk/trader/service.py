@@ -11,6 +11,7 @@ from typing import Any, Callable
 from heuristic_mt5_bridge.core.runtime.market_state import MarketStateService
 from heuristic_mt5_bridge.core.runtime.spec_registry import SymbolSpecRegistry
 from heuristic_mt5_bridge.fast_desk.context import FastContextConfig, FastContextService
+from heuristic_mt5_bridge.fast_desk.correlation.policy import FastCorrelationPolicy
 from heuristic_mt5_bridge.fast_desk.custody import FastCustodyEngine, FastCustodyPolicyConfig
 from heuristic_mt5_bridge.fast_desk.execution.bridge import FastExecutionBridge
 from heuristic_mt5_bridge.fast_desk.pending import FastPendingManager, FastPendingPolicyConfig
@@ -54,6 +55,17 @@ def _execution_slippage_from_spec(symbol_spec: dict[str, Any]) -> int:
 
 logger = logging.getLogger("fast_desk.trader")
 
+_CURRENCY_GROUPS = {
+    "EUR": "european",
+    "GBP": "european",
+    "CHF": "european",
+    "AUD": "commodity",
+    "NZD": "commodity",
+    "CAD": "commodity",
+    "USD": "usd_jpy",
+    "JPY": "usd_jpy",
+}
+
 
 class FastTraderService:
     """Orchestrates context -> setup -> trigger -> execution -> custody pipeline."""
@@ -67,9 +79,10 @@ class FastTraderService:
         trigger_config: FastTriggerConfig,
         pending_config: FastPendingPolicyConfig,
         custody_config: FastCustodyPolicyConfig,
+        correlation_policy: FastCorrelationPolicy | None = None,
     ) -> None:
         self.trader_config = trader_config
-        self.context_service = FastContextService(context_config)
+        self.context_service = FastContextService(context_config, correlation_policy=correlation_policy)
         self.setup_engine = FastSetupEngine(setup_config)
         self.trigger_engine = FastTriggerEngine(trigger_config)
         self.pending_manager = FastPendingManager(pending_config)
@@ -82,13 +95,22 @@ class FastTraderService:
     def _phase_is_constrained(market_phase: str) -> bool:
         return market_phase in {"ranging", "pullback_bull", "pullback_bear"}
 
+    @staticmethod
+    def _is_zone_reaction_setup(setup: Any) -> bool:
+        return bool(getattr(setup, "metadata", {}).get("zone_reaction", False))
+
     def _setup_allowed_for_phase(self, setup: Any, context: Any) -> bool:
         if not self._phase_is_constrained(str(getattr(context, "market_phase", ""))):
             return True
-        allowed_types = {"liquidity_sweep_reclaim", "order_block_retest", "sr_polarity_retest"}
+        allowed_types = {
+            "liquidity_sweep_reclaim",
+            "order_block_retest",
+            "sr_polarity_retest",
+            "fvg_reaction",
+        }
         if str(getattr(setup, "setup_type", "")) not in allowed_types:
             return False
-        min_conf = 0.74 if str(getattr(context, "market_phase", "")) == "ranging" else 0.72
+        min_conf = 0.70 if self._is_zone_reaction_setup(setup) else (0.74 if str(getattr(context, "market_phase", "")) == "ranging" else 0.72)
         return float(getattr(setup, "confidence", 0.0) or 0.0) >= min_conf
 
     def _trigger_allowed_for_phase(self, *, setup: Any, trigger: Any, context: Any) -> bool:
@@ -96,15 +118,115 @@ class FastTraderService:
             return False
         if not self._phase_is_constrained(str(getattr(context, "market_phase", ""))):
             return True
-        strong_triggers = {"reclaim", "micro_bos", "displacement"}
+        strong_triggers = {"reclaim", "micro_bos", "displacement", "zone_reclaim", "zone_sweep_reclaim"}
         if str(getattr(trigger, "trigger_type", "")) not in strong_triggers:
             return False
         combined_conf = (
             float(getattr(setup, "confidence", 0.0) or 0.0)
             + float(getattr(trigger, "confidence", 0.0) or 0.0)
         ) / 2.0
-        required = 0.76 if str(getattr(context, "market_phase", "")) == "ranging" else 0.74
+        required = 0.72 if self._is_zone_reaction_setup(setup) else (0.76 if str(getattr(context, "market_phase", "")) == "ranging" else 0.74)
         return combined_conf >= required
+
+    @staticmethod
+    def _extract_position_side(position: dict[str, Any]) -> str | None:
+        side = str(position.get("side", "")).lower().strip()
+        if side in {"buy", "sell"}:
+            return side
+        raw_type = position.get("type")
+        if raw_type in (0, "0", "buy", "long"):
+            return "buy"
+        if raw_type in (1, "1", "sell", "short"):
+            return "sell"
+        return None
+
+    @staticmethod
+    def _symbol_exposures(symbol: str, side: str) -> dict[str, int]:
+        sym = str(symbol or "").upper().strip()
+        if len(sym) != 6:
+            return {}
+        base = sym[:3]
+        quote = sym[3:]
+        if base not in _CURRENCY_GROUPS or quote not in _CURRENCY_GROUPS:
+            return {}
+        if side == "buy":
+            return {base: 1, quote: -1}
+        if side == "sell":
+            return {base: -1, quote: 1}
+        return {}
+
+    def _correlation_conflict(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        open_positions: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        candidate = self._symbol_exposures(symbol, side)
+        if not candidate:
+            return None
+        candidate_groups = {
+            _CURRENCY_GROUPS[cur]: sign
+            for cur, sign in candidate.items()
+            if cur in _CURRENCY_GROUPS
+        }
+        for position in open_positions:
+            existing_symbol = str(position.get("symbol", "")).upper().strip()
+            existing_side = self._extract_position_side(position)
+            if not existing_symbol or existing_side is None:
+                continue
+            existing = self._symbol_exposures(existing_symbol, existing_side)
+            if not existing:
+                continue
+            existing_groups = {
+                _CURRENCY_GROUPS[cur]: sign
+                for cur, sign in existing.items()
+                if cur in _CURRENCY_GROUPS
+            }
+            conflicts = []
+            for group, sign in candidate_groups.items():
+                existing_sign = existing_groups.get(group)
+                if existing_sign is not None and existing_sign != sign:
+                    conflicts.append(group)
+            if conflicts:
+                return {
+                    "reason": "correlation_conflict",
+                    "existing_symbol": existing_symbol,
+                    "existing_side": existing_side,
+                    "conflict_groups": conflicts,
+                }
+        return None
+
+    @staticmethod
+    def _setup_to_zone_snapshot(setup: Any) -> dict[str, Any] | None:
+        metadata = getattr(setup, "metadata", {}) if isinstance(getattr(setup, "metadata", {}), dict) else {}
+        if not metadata.get("zone_reaction"):
+            return None
+        low = float(metadata.get("zone_bottom", 0.0) or 0.0)
+        high = float(metadata.get("zone_top", 0.0) or 0.0)
+        if low <= 0 and high <= 0:
+            return None
+        if low <= 0:
+            low = high
+        if high <= 0:
+            high = low
+        timeframe_origin = str(metadata.get("timeframe_origin", "M5") or "M5").upper()
+        display_timeframes = FastSetupEngine._display_timeframes_for_origin(timeframe_origin)
+        return {
+            "symbol": str(getattr(setup, "symbol", "") or "").upper(),
+            "source": "fast",
+            "setup_type": str(getattr(setup, "setup_type", "") or ""),
+            "zone_type": str(metadata.get("zone_type", "") or ""),
+            "side": str(getattr(setup, "side", "") or ""),
+            "timeframe_origin": timeframe_origin,
+            "display_timeframes": display_timeframes,
+            "price_low": round(min(low, high), 10),
+            "price_high": round(max(low, high), 10),
+            "entry_price": float(getattr(setup, "entry_price", 0.0) or 0.0),
+            "retest_level": float(getattr(setup, "retest_level", 0.0) or 0.0),
+            "confidence": float(getattr(setup, "confidence", 0.0) or 0.0),
+            "htf_zone_state": str(metadata.get("htf_zone_state", "neutral") or "neutral"),
+        }
 
     def scan_and_execute(
         self,
@@ -138,10 +260,17 @@ class FastTraderService:
         candles_m5 = market_state.get_candles(symbol, "M5", 220)
         candles_htf = market_state.get_candles(symbol, "M30", 220)
         if len(candles_m1) < 30 or len(candles_m5) < 40 or len(candles_htf) < 40:
+            _ms_details = {
+                "message": "insufficient_candles",
+                "candle_counts": {"M1": len(candles_m1), "M5": len(candles_m5), "M30": len(candles_htf)},
+            }
             logger.debug(
                 "[%s] insufficient candles: M1=%d M5=%d M30=%d",
                 symbol, len(candles_m1), len(candles_m5), len(candles_htf),
             )
+            activity_log.emit(symbol, "context", False, _ms_details)
+            _trace.append(PipelineStageResult("context", False, _ms_details))
+            activity_log.emit_pipeline_trace(symbol, _trace, "context", False)
             return None
 
         context = self.context_service.build_context(
@@ -154,6 +283,9 @@ class FastTraderService:
             connector=connector if prefetched_tick is None else None,
             prefetched_tick=prefetched_tick,
             symbol_spec=symbol_spec,
+            db_path=db_path,
+            broker_server=broker_server,
+            account_login=account_login,
         )
         if not context.allowed:
             # Transient gate — high-frequency, no value persisting to disk
@@ -201,19 +333,31 @@ class FastTraderService:
             pip_size=float(pip_size),
             h1_bias=context.h1_bias,
             spread_pips=context.spread_pips,
+            htf_zones=context.details.get("smc_htf_zones", []),
+        )
+        activity_log.emit_zone_snapshot(
+            symbol,
+            self.setup_engine.enumerate_zones(
+                symbol=symbol,
+                candles_m1=candles_m1,
+                candles_m5=candles_m5,
+                candles_htf=candles_htf,
+            ),
         )
         if not setups:
             _setup_details = {
-                "message": "no_patterns_detected",
+                "message": "no_local_zone",
                 "market_phase": context.market_phase,
                 "warnings": context.warnings,
                 "candle_counts": {"M1": len(candles_m1), "M5": len(candles_m5), "M30": len(candles_htf)},
                 "h1_bias": context.h1_bias,
                 "volatility_regime": context.volatility_regime,
                 "exhaustion_risk": context.exhaustion_risk,
+                "smc_bias": context.details.get("smc_bias", "neutral"),
+                "smc_thesis_state": context.details.get("smc_thesis_state", "neutral"),
             }
             logger.info(
-                "[%s] no_patterns_detected: phase=%s bias=%s vol=%s exh=%s M5=%d M30=%d",
+                "[%s] no_local_zone: phase=%s bias=%s vol=%s exh=%s M5=%d M30=%d",
                 symbol, context.market_phase, context.h1_bias,
                 context.volatility_regime, context.exhaustion_risk,
                 len(candles_m5), len(candles_htf),
@@ -296,13 +440,18 @@ class FastTraderService:
         selected_trigger = None
         phase_filtered = 0
         for setup in setups:
-            if self.trader_config.require_h1_alignment and context.h1_bias in {"buy", "sell"} and setup.side != context.h1_bias:
+            if (
+                self.trader_config.require_h1_alignment
+                and context.h1_bias in {"buy", "sell"}
+                and setup.side != context.h1_bias
+                and not self._is_zone_reaction_setup(setup)
+            ):
                 continue
             if not self._setup_allowed_for_phase(setup, context):
                 phase_filtered += 1
                 continue
             # Exhaustion filter: high exhaustion risk requires higher confidence setups
-            if context.exhaustion_risk == "high" and setup.confidence < 0.80:
+            if context.exhaustion_risk == "high" and setup.confidence < (0.76 if self._is_zone_reaction_setup(setup) else 0.80):
                 continue
             trigger = self.trigger_engine.confirm(setup=setup, candles_m1=candles_m1, pip_size=float(pip_size), context=context)
             if self._trigger_allowed_for_phase(setup=setup, trigger=trigger, context=context):
@@ -315,13 +464,17 @@ class FastTraderService:
         if selected_setup is None or selected_trigger is None:
             # Either H1 alignment filtered all setups or no trigger confirmed
             setup_sides = [s.side for s in setups]
+            zone_setups = [s for s in setups if self._is_zone_reaction_setup(s)]
             _trig_details = {
+                "reason": "local_zone_detected_waiting_reaction" if zone_setups else "no_local_zone",
                 "setups_seen": len(setups), "setup_sides": setup_sides,
                 "h1_bias": context.h1_bias,
                 "require_h1_alignment": self.trader_config.require_h1_alignment,
                 "market_phase": context.market_phase,
                 "warnings": context.warnings,
                 "phase_filtered": phase_filtered,
+                "zone_setup_count": len(zone_setups),
+                "zone_setup_types": [s.setup_type for s in zone_setups[:6]],
             }
             activity_log.emit(symbol, "trigger", False, _trig_details)
             _trace.append(PipelineStageResult("trigger", False, _trig_details))
@@ -357,6 +510,18 @@ class FastTraderService:
             activity_log.emit_pipeline_trace(symbol, _trace, "entry_policy", False)
             return None
         _trace.append(PipelineStageResult("entry_policy", True, {}))
+
+        corr_conflict = self._correlation_conflict(
+            symbol=symbol,
+            side=selected_setup.side,
+            open_positions=fast_open_positions,
+        )
+        if corr_conflict is not None:
+            activity_log.emit(symbol, "correlation", False, corr_conflict)
+            _trace.append(PipelineStageResult("correlation", False, corr_conflict))
+            activity_log.emit_pipeline_trace(symbol, _trace, "correlation", False)
+            return None
+        _trace.append(PipelineStageResult("correlation", True, {}))
 
         balance = float(account_state.get("balance", 0.0) or 0.0)
         spec = spec_registry.get(symbol) or {}

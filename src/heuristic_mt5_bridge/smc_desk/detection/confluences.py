@@ -100,7 +100,7 @@ def evaluate_confluences(
     if isinstance(choch, dict):
         choch_index = int(choch.get("index", -1))
         choch_price = float(choch.get("price", 0.0) or 0.0)
-        if abs(choch_index - z_origin_idx) <= 3 and _zones_overlap(z_high, z_low, choch_price * 1.001, choch_price * 0.999):
+        if abs(choch_index - z_origin_idx) <= 3 and _zones_overlap(z_high, z_low, choch_price * 1.005, choch_price * 0.995):
             confluences.append("choch_at_origin")
         if choch.get("confirmed"):
             confluences.append("choch_confirmed")
@@ -191,7 +191,7 @@ def evaluate_confluences(
             if str(other.get("zone_type", "")) not in {"sweep_bsl", "sweep_ssl"}:
                 continue
             sweep_idx = int(other.get("origin_index", 0) or other.get("sweep_candle_index", 0) or 0)
-            if sweep_idx > 0 and 0 < choch_index - sweep_idx <= 5:
+            if sweep_idx > 0 and 0 < choch_index - sweep_idx <= 10:
                 if "sweep_choch_corr" not in confluences:
                     confluences.append("sweep_choch_corr")
                 break

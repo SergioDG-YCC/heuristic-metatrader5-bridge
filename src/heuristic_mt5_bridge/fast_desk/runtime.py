@@ -192,6 +192,7 @@ class FastDeskService:
         self._pending_config: FastPendingPolicyConfig | None = None
         self._custody_config: FastCustodyPolicyConfig | None = None
         self._trader_config: FastTraderConfig | None = None
+        self._correlation_policy: Any | None = None
 
     def update_context_config(self, cfg: FastDeskConfig) -> None:
         """Hot-reload live config from updated FastDeskConfig (called by API)."""
@@ -419,6 +420,7 @@ class FastDeskService:
                             pending_config=pending_config,
                             custody_config=custody_config,
                             trader_config=trader_config,
+                            correlation_policy=self._correlation_policy,
                             mt5_call_ref=mt5_call_ref,
                             allow_entries=allow_entries,
                             transient_custody_symbol=transient_custody_symbol,
@@ -537,6 +539,13 @@ class FastDeskService:
         return ordered
 
 
-def create_fast_desk_service(db_path: Path) -> FastDeskService:
+def create_fast_desk_service(
+    db_path: Path,
+    correlation_service: Any | None = None,
+) -> FastDeskService:
     config = FastDeskConfig.from_env()
-    return FastDeskService(db_path=db_path, config=config)
+    svc = FastDeskService(db_path=db_path, config=config)
+    if correlation_service is not None:
+        from heuristic_mt5_bridge.fast_desk.correlation.policy import FastCorrelationPolicy  # noqa: PLC0415
+        svc._correlation_policy = FastCorrelationPolicy(correlation_service, timeframe="M5")
+    return svc

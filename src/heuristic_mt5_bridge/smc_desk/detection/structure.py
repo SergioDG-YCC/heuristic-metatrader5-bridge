@@ -154,7 +154,7 @@ def _find_bos_choch(
                 break
 
     # CHoCH: first break opposite to the current trend
-    recent = labeled[-8:] if len(labeled) >= 8 else labeled
+    recent = labeled[-20:] if len(labeled) >= 20 else labeled
     recent_highs = [s for s in recent if s["type"] == "swing_high"]
     recent_lows = [s for s in recent if s["type"] == "swing_low"]
 
@@ -304,7 +304,7 @@ def _derive_trend(labeled: list[dict[str, Any]]) -> str:
     """Derive overall trend: 'bullish', 'bearish', or 'ranging'."""
     if not labeled:
         return "ranging"
-    recent = labeled[-8:] if len(labeled) >= 8 else labeled
+    recent = labeled[-20:] if len(labeled) >= 20 else labeled
 
     hh_count = sum(1 for s in recent if s.get("label") == "HH")
     hl_count = sum(1 for s in recent if s.get("label") == "HL")

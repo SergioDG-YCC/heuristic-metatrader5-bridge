@@ -2,9 +2,14 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from pathlib import Path
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from heuristic_mt5_bridge.fast_desk.correlation.policy import FastCorrelationPolicy
 
 from heuristic_mt5_bridge.core.runtime.market_state import session_name_from_timestamp
+from heuristic_mt5_bridge.infra.storage import runtime_db
 from heuristic_mt5_bridge.smc_desk.detection.structure import detect_market_structure
 
 
@@ -86,8 +91,9 @@ class FastContextService:
     HTF = M30 (higher timeframe for directional bias).
     """
 
-    def __init__(self, config: FastContextConfig | None = None) -> None:
+    def __init__(self, config: FastContextConfig | None = None, correlation_policy: FastCorrelationPolicy | None = None) -> None:
         self.config = config or FastContextConfig()
+        self._correlation_policy = correlation_policy
 
     def build_context(
         self,
@@ -101,8 +107,12 @@ class FastContextService:
         connector: Any | None = None,
         prefetched_tick: dict[str, Any] | None = None,
         symbol_spec: dict[str, Any] | None = None,
+        db_path: Path | None = None,
+        broker_server: str | None = None,
+        account_login: int | None = None,
         # Backward compat alias — callers using the old name still work.
         candles_h1: list[dict[str, Any]] | None = None,
+        open_positions: list[dict[str, Any]] | None = None,
     ) -> FastContext:
         # Resolve HTF candles: prefer explicit candles_htf, fall back to legacy candles_h1
         htf = candles_htf if candles_htf is not None else (candles_h1 or [])
@@ -210,8 +220,39 @@ class FastContextService:
         if overextended:
             warnings.append("ema_overextended")
 
+        smc_context = self._load_smc_context(
+            db_path=db_path,
+            broker_server=broker_server,
+            account_login=account_login,
+            symbol=symbol,
+        )
+
         # Phase 1: only HARD gates block execution
         allowed = not any(_reason_is_hard(r) for r in reasons)
+
+        details: dict[str, Any] = {
+            "htf_trend": trend,
+            "m1_bars": len(candles_m1),
+            "m5_bars": len(candles_m5),
+            "htf_bars": len(htf),
+            "ema_alignment": ema_alignment,
+            "overextended": overextended,
+            "ema_distance_atr": round(ema_distance_atr, 4),
+            "context_warnings": list(warnings),
+            "smc_bias": smc_context["smc_bias"],
+            "smc_thesis_state": smc_context["smc_thesis_state"],
+            "smc_htf_zones": smc_context["smc_htf_zones"],
+            "smc_data_freshness_seconds": smc_context["smc_data_freshness_seconds"],
+        }
+
+        if self._correlation_policy is not None:
+            details["correlation"] = self._correlation_policy.build_details(symbol)
+            if open_positions and htf_bias in ("buy", "sell"):
+                conflict, conflict_reason = self._correlation_policy.check_entry_conflict(
+                    symbol, htf_bias, open_positions
+                )
+                if conflict:
+                    warnings.append(f"correlation_conflict:{conflict_reason}")
 
         return FastContext(
             symbol=symbol,
@@ -227,17 +268,81 @@ class FastContextService:
             exhaustion_risk=exhaustion_risk,
             reasons=reasons,
             warnings=warnings,
-            details={
-                "htf_trend": trend,
-                "m1_bars": len(candles_m1),
-                "m5_bars": len(candles_m5),
-                "htf_bars": len(htf),
-                "ema_alignment": ema_alignment,
-                "overextended": overextended,
-                "ema_distance_atr": round(ema_distance_atr, 4),
-                "context_warnings": list(warnings),
-            },
+            details=details,
         )
+
+    @staticmethod
+    def _parse_iso8601(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    def _load_smc_context(
+        self,
+        *,
+        db_path: Path | None,
+        broker_server: str | None,
+        account_login: int | None,
+        symbol: str,
+    ) -> dict[str, Any]:
+        neutral = {
+            "smc_bias": "neutral",
+            "smc_thesis_state": "neutral",
+            "smc_htf_zones": [],
+            "smc_data_freshness_seconds": None,
+        }
+        if db_path is None or not broker_server or account_login is None:
+            return neutral
+        try:
+            rows = runtime_db.load_active_smc_thesis(
+                db_path,
+                broker_server=str(broker_server),
+                account_login=int(account_login),
+                symbol=symbol,
+            )
+        except Exception:
+            return neutral
+        if not rows:
+            return neutral
+        row = rows[0]
+        updated_at = self._parse_iso8601(row.get("updated_at"))
+        freshness = None
+        if updated_at is not None:
+            freshness = max(0.0, (datetime.now(timezone.utc) - updated_at.astimezone(timezone.utc)).total_seconds())
+        prepared = row.get("prepared_zones")
+        raw_watch_levels = row.get("watch_levels")
+        zones: list[dict[str, Any]] = []
+        if isinstance(raw_watch_levels, list):
+            for item in raw_watch_levels:
+                if not isinstance(item, dict):
+                    continue
+                high = item.get("price_high", item.get("high"))
+                low = item.get("price_low", item.get("low"))
+                if high is None and low is None:
+                    level = item.get("price", item.get("level"))
+                    if level is not None:
+                        item = dict(item)
+                        item["price_high"] = level
+                        item["price_low"] = level
+                zones.append(item)
+        if not zones and isinstance(prepared, list):
+            for item in prepared:
+                if isinstance(item, dict):
+                    zones.append(item)
+        bias = str(row.get("bias", "neutral") or "neutral").lower()
+        if bias not in {"buy", "sell"}:
+            bias = "neutral"
+        state = str(row.get("status", "neutral") or "neutral").lower()
+        return {
+            "smc_bias": bias,
+            "smc_thesis_state": state,
+            "smc_htf_zones": zones,
+            "smc_data_freshness_seconds": round(freshness, 1) if freshness is not None else None,
+        }
 
     @staticmethod
     def _volatility_regime(candles: list[dict[str, Any]]) -> str:

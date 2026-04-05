@@ -16,6 +16,7 @@ No disk writes. No module-level config. All params explicit.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import urllib.error
@@ -26,18 +27,44 @@ from typing import Any
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _ALLOWED_DECISIONS = frozenset({"accept", "reject", "adjust"})
 _ALLOWED_CONFIDENCE = frozenset({"high", "medium", "low"})
+_LLM_GATE = asyncio.Lock()
 
 
 # ---------------------------------------------------------------------------
-# Prompt loading
+# Prompt loading + versioning
 # ---------------------------------------------------------------------------
+
+_PROMPT_CACHE: dict[str, str] = {}
+_PROMPT_VERSION: str = ""
+
+
+def _ensure_prompt_cache() -> None:
+    """Load and cache prompts on first use. Compute prompt_version hash."""
+    global _PROMPT_VERSION
+    if _PROMPT_CACHE:
+        return
+    import hashlib
+    hasher = hashlib.sha1()
+    for name in ("system", "user"):
+        path = _PROMPTS_DIR / f"{name}.md"
+        content = path.read_text(encoding="utf-8")
+        _PROMPT_CACHE[name] = content
+        hasher.update(content.encode("utf-8"))
+    _PROMPT_VERSION = hasher.hexdigest()[:12]
+
 
 def _load_prompt(name: str, *, compact_json: str = "") -> str:
-    path = _PROMPTS_DIR / f"{name}.md"
-    text = path.read_text(encoding="utf-8")
+    _ensure_prompt_cache()
+    text = _PROMPT_CACHE[name]
     if compact_json:
         text = text.replace("{{compact_json}}", compact_json)
     return text
+
+
+def get_prompt_version() -> str:
+    """Return short hash of loaded prompts (for trace logging)."""
+    _ensure_prompt_cache()
+    return _PROMPT_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -147,13 +174,14 @@ def _call_localai_sync(
     *,
     model: str,
     max_tokens: int,
+    temperature: float,
     localai_base_url: str,
     timeout_seconds: float,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
     payload = {
         "model": model,
         "messages": messages,
-        "temperature": 0.1,
+        "temperature": temperature,
         "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
     }
@@ -173,6 +201,7 @@ def _call_localai_sync(
         raise RuntimeError(f"LocalAI connection failed: {exc.reason}") from exc
 
     result = json.loads(body)
+    usage = result.get("usage") or {}
     choices = result.get("choices")
     if not isinstance(choices, list) or not choices:
         raise ValueError("choices missing in LocalAI response")
@@ -182,7 +211,7 @@ def _call_localai_sync(
     if not isinstance(content, str) or not content.strip():
         raise ValueError("empty validator content from LocalAI")
 
-    return _extract_json(content)
+    return _extract_json(content), content, usage
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +242,7 @@ async def call_smc_validator(
         "llm_timeout_seconds": int,
         "localai_base_url": str (optional),
         "max_tokens": int (optional),
+        "temperature": float (optional),
     }
 
     Returns
@@ -223,11 +253,11 @@ async def call_smc_validator(
         "validated_thesis": dict,
     }
     """
-    import asyncio
 
     model = str(config.get("llm_model", "gemma-3-4b-it-qat"))
     timeout = float(config.get("llm_timeout_seconds", 60))
     max_tokens = int(config.get("max_tokens", 500))
+    temperature = float(config.get("temperature", 0.1))
     localai_base_url = str(
         config.get("localai_base_url", os.getenv("LOCALAI_BASE_URL", "http://127.0.0.1:8080"))
     ).rstrip("/")
@@ -254,15 +284,33 @@ async def call_smc_validator(
         "summary": "Validator unavailable; heuristic thesis preserved.",
     }
 
+    input_chars = len(compact_json)
     try:
-        raw = await asyncio.to_thread(
-            _call_localai_sync,
-            messages,
-            model=model,
-            max_tokens=max_tokens,
-            localai_base_url=localai_base_url,
-            timeout_seconds=timeout,
+        import time as _time
+        t0 = _time.monotonic()
+        async with _LLM_GATE:
+            raw, raw_content, usage = await asyncio.to_thread(
+                _call_localai_sync,
+                messages,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                localai_base_url=localai_base_url,
+                timeout_seconds=timeout,
+            )
+        elapsed = _time.monotonic() - t0
+
+        prompt_tokens = int(usage.get("prompt_tokens", 0))
+        completion_tokens = int(usage.get("completion_tokens", 0))
+        print(
+            f"[smc-validator] {symbol} model={model} "
+            f"elapsed={elapsed:.1f}s prompt_tok={prompt_tokens} "
+            f"compl_tok={completion_tokens} input_chars={input_chars} "
+            f"budget={max_tokens}"
         )
+        if max_tokens > 0 and completion_tokens > int(max_tokens * 0.8):
+            print(f"[smc-validator] WARNING {symbol}: completion_tokens={completion_tokens} near budget={max_tokens}")
+
         normalized = _normalize_validator_output(raw)
         validated = _apply_validator_result(dict(heuristic_thesis), normalized)
         return {

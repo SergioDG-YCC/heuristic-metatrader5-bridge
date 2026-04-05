@@ -69,8 +69,8 @@ class SmcScannerConfig:
     approach_pct: float = 1.5
     min_impulse_candles: int = 3
     max_active_zones_per_symbol: int = 10
-    d1_bars: int = 100
-    h4_bars: int = 200
+    d1_bars: int = 300
+    h4_bars: int = 600
     min_quality_score: float = 0.2
 
     @classmethod
@@ -88,8 +88,8 @@ class SmcScannerConfig:
             approach_pct=float(_env("SMC_ZONE_APPROACH_PCT", "1.5")),
             min_impulse_candles=int(_env("SMC_MIN_IMPULSE_CANDLES", "3")),
             max_active_zones_per_symbol=int(_env("SMC_MAX_ACTIVE_ZONES_PER_SYMBOL", "10")),
-            d1_bars=int(_env("SMC_SCANNER_D1_BARS", "100")),
-            h4_bars=int(_env("SMC_SCANNER_H4_BARS", "200")),
+            d1_bars=int(_env("SMC_SCANNER_D1_BARS", "300")),
+            h4_bars=int(_env("SMC_SCANNER_H4_BARS", "600")),
             min_quality_score=float(_env("SMC_MIN_QUALITY_SCORE", "0.2")),
         )
 

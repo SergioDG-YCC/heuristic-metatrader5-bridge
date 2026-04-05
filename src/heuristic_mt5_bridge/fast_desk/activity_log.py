@@ -50,6 +50,7 @@ _global_ring: deque[FastScanEvent] = deque(maxlen=_MAX_GLOBAL)
 _symbol_rings: dict[str, deque[FastScanEvent]] = {}
 _pipeline_ring: deque[PipelineTrace] = deque(maxlen=_MAX_PIPELINE_TRACES)
 _pipeline_cursor: int = 0  # monotonic counter for incremental reads
+_zone_snapshots: dict[str, dict[str, Any]] = {}
 
 
 def _utc_now_iso() -> str:
@@ -143,6 +144,30 @@ def emit_pipeline_trace(
     with _lock:
         _pipeline_ring.append(trace)
         _pipeline_cursor += 1
+
+
+def emit_zone_snapshot(symbol: str, zones: list[dict[str, Any]]) -> None:
+    """Replace the latest zone snapshot for *symbol* with current FAST-detected zones."""
+    payload = {
+        "symbol": symbol.upper(),
+        "updated_at": _utc_now_iso(),
+        "zones": list(zones),
+    }
+    with _lock:
+        _zone_snapshots[symbol.upper()] = payload
+
+
+def zone_snapshot(symbol: str) -> dict[str, Any]:
+    with _lock:
+        item = _zone_snapshots.get(symbol.upper())
+    return dict(item) if isinstance(item, dict) else {"symbol": symbol.upper(), "updated_at": _utc_now_iso(), "zones": []}
+
+
+def zone_snapshots(limit: int = 100) -> list[dict[str, Any]]:
+    with _lock:
+        items = list(_zone_snapshots.values())
+    items.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
+    return items[:limit]
 
 
 def pipeline_traces_since(cursor: int, limit: int = 100) -> tuple[list[dict[str, Any]], int]:

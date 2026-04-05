@@ -458,6 +458,29 @@ export interface FastActivityResponse {
   updated_at: string;
 }
 
+// ─── Correlation Engine ───────────────────────────────────────────────────────
+export interface CorrelationPairRow {
+  symbol_a: string;
+  symbol_b: string;
+  coefficient: number;
+  bars_used: number;
+  coverage_ratio: number;
+  coverage_ok: boolean;
+  source_stale: boolean;
+  computed_at: string;
+}
+
+export interface CorrelationMatrixResponse {
+  status: string;
+  timeframe: string;
+  pairs: CorrelationPairRow[];
+  pair_count: number;
+  min_pair_bars: number;
+  all_pairs_coverage_ok: boolean;
+  computed_at: string;
+  symbols: string[];
+}
+
 export interface FastSignalRow {
   signal_id: string;
   symbol: string;
@@ -482,6 +505,23 @@ export interface FastTradeLogRow {
   signal_id?: string | null;
   details_json?: Record<string, unknown>;
   logged_at: string;
+  [key: string]: unknown;
+}
+
+export interface FastZoneRow {
+  symbol: string;
+  source: "fast";
+  setup_type: string;
+  zone_type: string;
+  side: string;
+  timeframe_origin: string;
+  display_timeframes?: string[];
+  price_low: number;
+  price_high: number;
+  entry_price?: number;
+  retest_level?: number;
+  confidence?: number;
+  htf_zone_state?: string;
   [key: string]: unknown;
 }
 
