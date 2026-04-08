@@ -129,7 +129,12 @@ class CoreRuntimeConfig:
             account_refresh_seconds=float(getenv("CORE_ACCOUNT_REFRESH_SECONDS", env_values, "2")),
             indicator_refresh_seconds=float(getenv("CORE_INDICATOR_REFRESH_SECONDS", env_values, "2")),
             market_state_checkpoint_seconds=float(getenv("CORE_MARKET_STATE_CHECKPOINT_SECONDS", env_values, "30")),
-            risk_adopt_foreign_positions=_parse_bool(getenv("RISK_ADOPT_FOREIGN_POSITIONS", env_values, "true"), True),
+            risk_adopt_foreign_positions=_parse_bool(
+                # Canonical env var; OWNERSHIP_AUTO_ADOPT_FOREIGN is a legacy alias.
+                getenv("RISK_ADOPT_FOREIGN_POSITIONS", env_values, "")
+                or getenv("OWNERSHIP_AUTO_ADOPT_FOREIGN", env_values, "true"),
+                True,
+            ),
             ownership_history_retention_days=int(getenv("OWNERSHIP_HISTORY_RETENTION_DAYS", env_values, "30")),
             sessions_enabled=_parse_bool(getenv("BROKER_SESSIONS_ENABLED", env_values, "false"), False),
             sessions_host=getenv("BROKER_SESSIONS_HOST", env_values, "127.0.0.1").strip() or "127.0.0.1",
@@ -933,6 +938,95 @@ class CoreRuntimeService:
             raise RuntimeError("Risk kernel is not initialized")
         return self.risk_kernel.reset_kill_switch(reason=reason, manual_override=manual_override)
 
+    # ── Desk-scoped account payload ────────────────────────────────────────────
+
+    def ownership_visible_ids_for_desk(self, *, desk: str) -> dict[str, set[int]]:
+        """Return position_ids and order_ids visible for *desk* based on ownership.
+
+        For desk="fast": visible are rows with desk_owner=="fast" or
+            ownership_status in {"fast_owned", "inherited_fast"}.
+            ``inherited_fast`` means tickets external to the stack (e.g. manual
+            human trades) — SMC tickets are never reclassified as inherited_fast.
+        For desk="smc": visible are rows with desk_owner=="smc" or
+            ownership_status=="smc_owned".
+
+        If the ownership registry is not yet initialised, returns empty sets.
+        Callers that need a safe fallback should check whether both sets are empty.
+        """
+        position_ids: set[int] = set()
+        order_ids: set[int] = set()
+        if self.ownership_registry is None:
+            return {"position_ids": position_ids, "order_ids": order_ids}
+
+        desk_norm = str(desk or "").strip().lower()
+        rows = self.ownership_registry.list_open()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            owner = str(row.get("desk_owner", "")).strip().lower()
+            status = str(row.get("ownership_status", "")).strip().lower()
+
+            if desk_norm == "fast":
+                visible = (owner == "fast") or (status in {"fast_owned", "inherited_fast"})
+            elif desk_norm == "smc":
+                visible = (owner == "smc") or (status == "smc_owned")
+            else:
+                visible = False
+
+            if not visible:
+                continue
+
+            pos_id = int(row.get("mt5_position_id", 0) or 0)
+            ord_id = int(row.get("mt5_order_id", 0) or 0)
+            if pos_id > 0:
+                position_ids.add(pos_id)
+            if ord_id > 0:
+                order_ids.add(ord_id)
+
+        return {"position_ids": position_ids, "order_ids": order_ids}
+
+    def account_payload_for_desk(self, *, desk: str) -> dict[str, Any]:
+        """Return account_payload filtered to only include positions and orders
+        visible for *desk*.
+
+        Positions and orders are filtered by ownership_visible_ids_for_desk.
+        account_state, exposure_state, recent_deals, and recent_orders remain
+        global (they do not contain per-ticket information that would contaminate
+        desk isolation).
+
+        If the ownership registry is not yet initialised, the global
+        account_payload is returned unchanged as a safe bootstrap fallback.
+        This fallback is intentionally conservative: desks should not be running
+        before bootstrap completes, so the window is effectively zero.
+        """
+        if not isinstance(self.account_payload, dict):
+            return {}
+        if self.ownership_registry is None:
+            # Registry not yet initialised — return global payload unchanged.
+            return self.account_payload
+
+        visible = self.ownership_visible_ids_for_desk(desk=desk)
+        visible_position_ids = visible["position_ids"]
+        visible_order_ids = visible["order_ids"]
+
+        all_positions: list[dict[str, Any]] = self.account_payload.get("positions") or []
+        all_orders: list[dict[str, Any]] = self.account_payload.get("orders") or []
+
+        desk_positions = [
+            p for p in all_positions
+            if isinstance(p, dict) and int(p.get("position_id", 0) or 0) in visible_position_ids
+        ]
+        desk_orders = [
+            o for o in all_orders
+            if isinstance(o, dict) and int(o.get("order_id", 0) or 0) in visible_order_ids
+        ]
+
+        return {
+            **self.account_payload,
+            "positions": desk_positions,
+            "orders": desk_orders,
+        }
+
     async def run_once(self) -> None:
         if not self._bootstrapped:
             await self.bootstrap()
@@ -1000,7 +1094,8 @@ class CoreRuntimeService:
                                 ) if self.ownership_registry is not None else []
                             ),
                             connector=self.connector,
-                            account_payload_ref=lambda: self.account_payload,
+                            # SMC receives only smc_owned positions and orders.
+                            account_payload_ref=lambda: self.account_payload_for_desk(desk="smc"),
                             ownership_open_ref=lambda: self.ownership_open_for_desk(desk="smc"),
                             mt5_call_ref=self._mt5_call,
                         ),
@@ -1014,7 +1109,8 @@ class CoreRuntimeService:
                             int(self.broker_identity.get("account_login", 0) or 0),
                             self.spec_registry,
                             self.connector,
-                            lambda: self.account_payload,
+                            # FAST receives only fast_owned and inherited_fast positions/orders.
+                            lambda: self.account_payload_for_desk(desk="fast"),
                             lambda symbol: self.evaluate_entry_for_desk(desk="fast", symbol=symbol),
                             lambda result, symbol, side, signal_id=None: self.register_fast_execution_ownership(
                                 result=result,

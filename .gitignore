@@ -9,12 +9,6 @@ __pycache__/
 .coverage
 htmlcov/
 
-docs/audit
-docs/fast_trader
-docs/plans
-docs/prompts
-docs/webui
-
 storage/*
 !storage/.gitkeep
 
@@ -28,4 +22,3 @@ storage/runtime.db
 configs/*.local.env
 
 apps/webui/node_modules/
-

@@ -462,7 +462,7 @@ export interface FastActivityResponse {
 export interface CorrelationPairRow {
   symbol_a: string;
   symbol_b: string;
-  coefficient: number;
+  coefficient: number | null;
   bars_used: number;
   coverage_ratio: number;
   coverage_ok: boolean;

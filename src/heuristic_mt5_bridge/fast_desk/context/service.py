@@ -33,7 +33,7 @@ class FastContextConfig:
     spread_tolerance: str = "medium"    # "low" | "medium" | "high"
     max_slippage_pct: float = 0.05      # max tick-vs-candle divergence as % of price
     stale_feed_seconds: int = 180
-    require_h1_alignment: bool = True
+    require_m30_alignment: bool = True
     allowed_sessions: tuple[str, ...] = ("london", "overlap", "new_york")
     spread_thresholds: dict[str, dict[str, float]] = field(default_factory=_default_thresholds)
 
@@ -57,7 +57,7 @@ def _classify_asset(symbol: str, spec: dict[str, Any] | None) -> str:
 class FastContext:
     symbol: str
     session_name: str
-    h1_bias: str
+    m30_bias: str
     volatility_regime: str
     spread_pips: float
     expected_slippage_points: float
@@ -257,7 +257,7 @@ class FastContextService:
         return FastContext(
             symbol=symbol,
             session_name=session_name,
-            h1_bias=htf_bias,
+            m30_bias=htf_bias,
             volatility_regime=volatility_regime,
             spread_pips=round(spread_pips, 4),
             expected_slippage_points=round(expected_slippage_points, 4),

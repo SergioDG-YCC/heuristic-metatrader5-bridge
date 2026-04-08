@@ -1,0 +1,210 @@
+{
+    "generated_at_utc":  "2026-03-25T01:55:28Z",
+    "documents_count":  29,
+    "bundle_root":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle",
+    "items":  [
+                  {
+                      "order":  1,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\FAST_TRADER_IMMEDIATE_ACTION_PROMPT.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/fast_trader/FAST_TRADER_IMMEDIATE_ACTION_PROMPT.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\fast_trader\\FAST_TRADER_IMMEDIATE_ACTION_PROMPT.md",
+                      "sha256":  "1ea0f7ce03fd71ace75767612f5154929bb305696ee9400b2e80ce214889f52f"
+                  },
+                  {
+                      "order":  2,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\FAST_TRADER_BACKEND_HANDOFF.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/fast_trader/FAST_TRADER_BACKEND_HANDOFF.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\fast_trader\\FAST_TRADER_BACKEND_HANDOFF.md",
+                      "sha256":  "a5baef5175d4861fb984f0aab76e19334304c99bd3ace3f7acbfa0b6d3e59f95"
+                  },
+                  {
+                      "order":  3,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\audit\\2026-03-24_fast_trader_gap_audit.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/fast_trader/audit/2026-03-24_fast_trader_gap_audit.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\fast_trader\\audit\\2026-03-24_fast_trader_gap_audit.md",
+                      "sha256":  "17a8098b7eef763f153852a8527ff17a99c03dd4612ff87fb1f8ad55066e2a44"
+                  },
+                  {
+                      "order":  4,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\sources\\2026-03-24_fast_trader_source_inventory.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/fast_trader/sources/2026-03-24_fast_trader_source_inventory.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\fast_trader\\sources\\2026-03-24_fast_trader_source_inventory.md",
+                      "sha256":  "18e31ef7baf466e987c342972f819148ec4fedcaf5abe4c17ebc8cb2e0415ad6"
+                  },
+                  {
+                      "order":  5,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\plans\\2026-03-24_fast_trader_constructor_plan.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/fast_trader/plans/2026-03-24_fast_trader_constructor_plan.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\fast_trader\\plans\\2026-03-24_fast_trader_constructor_plan.md",
+                      "sha256":  "57549ca262b3ba29b97643dda1d562f17d69611458fc9a762320476d59d3b993"
+                  },
+                  {
+                      "order":  6,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\actions\\2026-03-24_fast_trader_constructor_actions.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/fast_trader/actions/2026-03-24_fast_trader_constructor_actions.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\fast_trader\\actions\\2026-03-24_fast_trader_constructor_actions.md",
+                      "sha256":  "908c755395905bd7c0b79816a04dd6fb9238aedfd59f8dfb3d63483b7e1bbbad"
+                  },
+                  {
+                      "order":  7,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\prompts\\2026-03-24_FAST_TRADER_SERVICE_CONSTRUCTOR.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/fast_trader/prompts/2026-03-24_FAST_TRADER_SERVICE_CONSTRUCTOR.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\fast_trader\\prompts\\2026-03-24_FAST_TRADER_SERVICE_CONSTRUCTOR.md",
+                      "sha256":  "9d3afae0ce60958eaf08b742c9087a3971231667cc573f8954ef99cc8a9e984e"
+                  },
+                  {
+                      "order":  8,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\actions\\README.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/fast_trader/actions/README.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\fast_trader\\actions\\README.md",
+                      "sha256":  "595ee213396bbbdae852192da3784b9ef5df4d61feacdb428557a396cce66a39"
+                  },
+                  {
+                      "order":  9,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\audit\\README.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/fast_trader/audit/README.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\fast_trader\\audit\\README.md",
+                      "sha256":  "8ebb89663a9f1f6a71092440846f5c2c1a61cbfc25fe7d9bfa4f2ed9336d4b94"
+                  },
+                  {
+                      "order":  10,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\plans\\README.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/fast_trader/plans/README.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\fast_trader\\plans\\README.md",
+                      "sha256":  "183daa511c59746cc8d5fcf22f5962c4ac28a2ad6b0f670f7c7b92073948731c"
+                  },
+                  {
+                      "order":  11,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\prompts\\README.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/fast_trader/prompts/README.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\fast_trader\\prompts\\README.md",
+                      "sha256":  "cd0f3553ee34e0b41dc9801d8bfbb40a8f68a9ec56d29879e4ec43d95fed2410"
+                  },
+                  {
+                      "order":  12,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\README.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/fast_trader/README.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\fast_trader\\README.md",
+                      "sha256":  "2572b15d51f6daed4321c089fb5d21f5adeddd317f480d3ef91dacd6c4b5d24e"
+                  },
+                  {
+                      "order":  13,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\sources\\README.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/fast_trader/sources/README.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\fast_trader\\sources\\README.md",
+                      "sha256":  "ec7e3328a1aaddf43ee99669b224c6e67d697f4dc597726252be7892a55e769e"
+                  },
+                  {
+                      "order":  14,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\ARCHITECTURE.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/ARCHITECTURE.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\ARCHITECTURE.md",
+                      "sha256":  "a04cd010d10170ad02c2864f37d2e1ea04dd66e7ef5974fbe98204b100cc5afe"
+                  },
+                  {
+                      "order":  15,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\README.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/README.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\README.md",
+                      "sha256":  "fa53a4d688c8a195bfaf92e91ad273e30c9e84bb695cad7809553aa98c1ea1b1"
+                  },
+                  {
+                      "order":  16,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\plans\\2026-03-24_immutable_bridge_action_plan.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/plans/2026-03-24_immutable_bridge_action_plan.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\plans\\2026-03-24_immutable_bridge_action_plan.md",
+                      "sha256":  "ae59fa4e2c51c39ba67d57b94373f8b378e4bb2c0dec94dd433d8fd99eea0690"
+                  },
+                  {
+                      "order":  17,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\plans\\2026-03-24_ownership_risk_operational_contract.md",
+                      "source_rel":  "heuristic-metatrader5-bridge/docs/plans/2026-03-24_ownership_risk_operational_contract.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\docs\\plans\\2026-03-24_ownership_risk_operational_contract.md",
+                      "sha256":  "4b2c10e6e928f61cf033b55305349cd2f91f18bf64042f59c71c1763474674ce"
+                  },
+                  {
+                      "order":  18,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\src\\heuristic_mt5_bridge\\core\\runtime\\service.py",
+                      "source_rel":  "heuristic-metatrader5-bridge/src/heuristic_mt5_bridge/core/runtime/service.py",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\src\\heuristic_mt5_bridge\\core\\runtime\\service.py",
+                      "sha256":  "9a6c59314792fa9acf83453565c3b84702b809a16ad42dec3a9b5d8b62336568"
+                  },
+                  {
+                      "order":  19,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\src\\heuristic_mt5_bridge\\infra\\mt5\\connector.py",
+                      "source_rel":  "heuristic-metatrader5-bridge/src/heuristic_mt5_bridge/infra/mt5/connector.py",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\src\\heuristic_mt5_bridge\\infra\\mt5\\connector.py",
+                      "sha256":  "0191e93e67ec9cc3f1ef9bc235c29bc57e9189ddb158ef5ebd5096299ccccd72"
+                  },
+                  {
+                      "order":  20,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\src\\heuristic_mt5_bridge\\core\\ownership\\registry.py",
+                      "source_rel":  "heuristic-metatrader5-bridge/src/heuristic_mt5_bridge/core/ownership/registry.py",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\src\\heuristic_mt5_bridge\\core\\ownership\\registry.py",
+                      "sha256":  "d243ca84b7b5bd282867eb593f23fb2d075b3f27a6e6f6185551854ef99f7989"
+                  },
+                  {
+                      "order":  21,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\src\\heuristic_mt5_bridge\\core\\risk\\kernel.py",
+                      "source_rel":  "heuristic-metatrader5-bridge/src/heuristic_mt5_bridge/core/risk/kernel.py",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\src\\heuristic_mt5_bridge\\core\\risk\\kernel.py",
+                      "sha256":  "e43f2ea5c23b94f04cdf3e4e4003059bba02e6639db8405ec3e7a037d119782e"
+                  },
+                  {
+                      "order":  22,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\src\\heuristic_mt5_bridge\\infra\\storage\\runtime_db.py",
+                      "source_rel":  "heuristic-metatrader5-bridge/src/heuristic_mt5_bridge/infra/storage/runtime_db.py",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\heuristic-metatrader5-bridge\\src\\heuristic_mt5_bridge\\infra\\storage\\runtime_db.py",
+                      "sha256":  "3983ef623f5731b5a340d826aba061b09e79b7e8862e0a22526a14f749ce004d"
+                  },
+                  {
+                      "order":  23,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\llm-metatrader5-bridge\\CHANGELOG.md",
+                      "source_rel":  "llm-metatrader5-bridge/CHANGELOG.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\llm-metatrader5-bridge\\CHANGELOG.md",
+                      "sha256":  "7c3efb6e9b2102ddfd7ce236a76224dd76eb7bad1d34acb6e52657d2c8c598aa"
+                  },
+                  {
+                      "order":  24,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\llm-metatrader5-bridge\\python\\live_execution_trader_runtime.py",
+                      "source_rel":  "llm-metatrader5-bridge/python/live_execution_trader_runtime.py",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\llm-metatrader5-bridge\\python\\live_execution_trader_runtime.py",
+                      "sha256":  "b099cc55347b1d7b0fe30b4f9ef32cb93ca650e980d8b6cd23218e3b43a6eed9"
+                  },
+                  {
+                      "order":  25,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\llm-metatrader5-bridge\\python\\execution_bridge.py",
+                      "source_rel":  "llm-metatrader5-bridge/python/execution_bridge.py",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\llm-metatrader5-bridge\\python\\execution_bridge.py",
+                      "sha256":  "9a025b5657566716a6fa1496bd9979bcf37ea743dc8e87784e24e11b959890b0"
+                  },
+                  {
+                      "order":  26,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\llm-metatrader5-bridge\\python\\smc_heuristic_scanner.py",
+                      "source_rel":  "llm-metatrader5-bridge/python/smc_heuristic_scanner.py",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\llm-metatrader5-bridge\\python\\smc_heuristic_scanner.py",
+                      "sha256":  "7ab5fcf07118ca0d10b104c00e8bfd19f942d3c7885ff90e3e37437fb84bfa82"
+                  },
+                  {
+                      "order":  27,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\llm-metatrader5-bridge\\python\\prompts\\smc_trader\\tools\\chartism_patterns.md",
+                      "source_rel":  "llm-metatrader5-bridge/python/prompts/smc_trader/tools/chartism_patterns.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\llm-metatrader5-bridge\\python\\prompts\\smc_trader\\tools\\chartism_patterns.md",
+                      "sha256":  "c2b94c7d2de233c6cf757434193f43e760fdee7fe4b561e4c87f12bb96b00b3a"
+                  },
+                  {
+                      "order":  28,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\llm-metatrader5-bridge\\python\\prompts\\smc_trader\\tools\\sltp_methods.md",
+                      "source_rel":  "llm-metatrader5-bridge/python/prompts/smc_trader/tools/sltp_methods.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\llm-metatrader5-bridge\\python\\prompts\\smc_trader\\tools\\sltp_methods.md",
+                      "sha256":  "6d75dd9799927a4246179e4c4973a751640518fb292adbad92367eafd976f27c"
+                  },
+                  {
+                      "order":  29,
+                      "source_abs":  "E:\\GITLAB\\Sergio_Privado\\llm-metatrader5-bridge\\python\\prompts\\smc_trader\\tools\\smc_entry_models.md",
+                      "source_rel":  "llm-metatrader5-bridge/python/prompts/smc_trader/tools/smc_entry_models.md",
+                      "destination_abs":  "E:\\GITLAB\\Sergio_Privado\\heuristic-metatrader5-bridge\\docs\\fast_trader\\results\\2026-03-24_fast_trader_print_bundle\\documents\\llm-metatrader5-bridge\\python\\prompts\\smc_trader\\tools\\smc_entry_models.md",
+                      "sha256":  "6e8f6781fd04f9507734a890355a2b9d18584ee91ca5fd0e2363443421fbf61c"
+                  }
+              ]
+}

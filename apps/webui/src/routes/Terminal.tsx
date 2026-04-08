@@ -9,6 +9,18 @@ function numStr(v: unknown, dp = 5): string {
   return n.toFixed(dp);
 }
 
+function deskLabel(owner: string | undefined): string {
+  if (owner === "fast") return "FAST";
+  if (owner === "smc") return "SMC";
+  return "—";
+}
+
+function deskClass(owner: string | undefined): string {
+  if (owner === "fast") return "desk-badge fast on";
+  if (owner === "smc") return "desk-badge smc on";
+  return "desk-badge";
+}
+
 const Terminal: Component = () => {
   onMount(() => {
     initTerminalStore();
@@ -178,26 +190,35 @@ const Terminal: Component = () => {
               <table class="data-table">
                 <thead>
                   <tr>
-                    {["Ticket", "Symbol", "Type", "Vol", "Price", "PnL", "Time"].map((h) => (
+                    {["Ticket", "Desk", "Symbol", "Type", "Vol", "Price", "PnL", "Time"].map((h) => (
                       <th>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   <For each={(terminalStore.account?.recent_deals ?? []) as Record<string, unknown>[]}>
-                    {(deal) => (
-                      <tr>
-                        <td>#{String(deal.deal_id ?? "—")}</td>
-                        <td class="td-sym">{String(deal.symbol ?? "—")}</td>
-                        <td>{deal.entry === 0 ? "IN" : deal.entry === 1 ? "OUT" : "—"}</td>
-                        <td style={{ "text-align": "right" }}>{numStr(deal.volume, 2)}</td>
-                        <td style={{ "text-align": "right" }}>{numStr(deal.price)}</td>
-                        <td style={{ "text-align": "right" }} class={Number(deal.profit ?? 0) >= 0 ? "td-pos" : "td-neg"}>
-                          {Number(deal.profit ?? 0) >= 0 ? "+" : ""}{numStr(deal.profit, 2)}
-                        </td>
-                        <td style={{ color: "var(--text-muted)", "font-size": "8.5px" }}>{String(deal.time ?? "—")}</td>
-                      </tr>
-                    )}
+                    {(deal) => {
+                      const owner = terminalStore.ownershipByOrderId[deal.order_id as number]?.desk_owner;
+                      return (
+                        <tr>
+                          <td>#{String(deal.deal_id ?? "—")}</td>
+                          <td><span class={deskClass(owner)}>{deskLabel(owner)}</span></td>
+                          <td class="td-sym">{String(deal.symbol ?? "—")}</td>
+                          <td>{deal.entry === 0 ? "IN" : deal.entry === 1 ? "OUT" : "—"}</td>
+                          <td style={{ "text-align": "right" }}>{numStr(deal.volume, 2)}</td>
+                          <td style={{ "text-align": "right" }}>{numStr(deal.price)}</td>
+                          <td
+                            style={{ "text-align": "right" }}
+                            class={deal.entry === 1 ? (Number(deal.profit ?? 0) >= 0 ? "td-pos" : "td-neg") : undefined}
+                          >
+                            {deal.entry === 1
+                              ? `${Number(deal.profit ?? 0) >= 0 ? "+" : ""}${numStr(deal.profit, 2)}`
+                              : <span style={{ color: "var(--text-muted)" }}>—</span>}
+                          </td>
+                          <td style={{ color: "var(--text-muted)", "font-size": "8.5px" }}>{String(deal.time ?? "—")}</td>
+                        </tr>
+                      );
+                    }}
                   </For>
                 </tbody>
               </table>

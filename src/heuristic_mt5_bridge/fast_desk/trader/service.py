@@ -29,7 +29,7 @@ from heuristic_mt5_bridge.infra.storage import runtime_db
 class FastTraderConfig:
     signal_cooldown: float = 60.0
     enable_pending_orders: bool = True
-    require_h1_alignment: bool = True
+    require_m30_alignment: bool = True
     adoption_grace_seconds: float = 120.0
 
 
@@ -291,7 +291,7 @@ class FastTraderService:
             # Transient gate — high-frequency, no value persisting to disk
             _ctx_details = {
                 "reasons": context.reasons, "session": context.session_name,
-                "h1_bias": context.h1_bias, "spread_pips": context.spread_pips,
+                "m30_bias": context.m30_bias, "spread_pips": context.spread_pips,
                 "market_phase": context.market_phase,
                 "exhaustion_risk": context.exhaustion_risk,
                 "warnings": context.warnings,
@@ -320,7 +320,7 @@ class FastTraderService:
                 activity_log.emit_pipeline_trace(symbol, _trace, "context", False)
             return None
         _trace.append(PipelineStageResult("context", True, {
-            "session": context.session_name, "h1_bias": context.h1_bias,
+            "session": context.session_name, "m30_bias": context.m30_bias,
             "spread_pips": context.spread_pips, "market_phase": context.market_phase,
             "warnings": context.warnings,
             "candle_counts": {"M1": len(candles_m1), "M5": len(candles_m5), "M30": len(candles_htf)},
@@ -331,7 +331,7 @@ class FastTraderService:
             candles_m5=candles_m5,
             candles_htf=candles_htf,
             pip_size=float(pip_size),
-            h1_bias=context.h1_bias,
+            m30_bias=context.m30_bias,
             spread_pips=context.spread_pips,
             htf_zones=context.details.get("smc_htf_zones", []),
         )
@@ -350,7 +350,7 @@ class FastTraderService:
                 "market_phase": context.market_phase,
                 "warnings": context.warnings,
                 "candle_counts": {"M1": len(candles_m1), "M5": len(candles_m5), "M30": len(candles_htf)},
-                "h1_bias": context.h1_bias,
+                "m30_bias": context.m30_bias,
                 "volatility_regime": context.volatility_regime,
                 "exhaustion_risk": context.exhaustion_risk,
                 "smc_bias": context.details.get("smc_bias", "neutral"),
@@ -358,7 +358,7 @@ class FastTraderService:
             }
             logger.info(
                 "[%s] no_local_zone: phase=%s bias=%s vol=%s exh=%s M5=%d M30=%d",
-                symbol, context.market_phase, context.h1_bias,
+                symbol, context.market_phase, context.m30_bias,
                 context.volatility_regime, context.exhaustion_risk,
                 len(candles_m5), len(candles_htf),
             )
@@ -441,9 +441,9 @@ class FastTraderService:
         phase_filtered = 0
         for setup in setups:
             if (
-                self.trader_config.require_h1_alignment
-                and context.h1_bias in {"buy", "sell"}
-                and setup.side != context.h1_bias
+                self.trader_config.require_m30_alignment
+                and context.m30_bias in {"buy", "sell"}
+                and setup.side != context.m30_bias
                 and not self._is_zone_reaction_setup(setup)
             ):
                 continue
@@ -468,8 +468,8 @@ class FastTraderService:
             _trig_details = {
                 "reason": "local_zone_detected_waiting_reaction" if zone_setups else "no_local_zone",
                 "setups_seen": len(setups), "setup_sides": setup_sides,
-                "h1_bias": context.h1_bias,
-                "require_h1_alignment": self.trader_config.require_h1_alignment,
+                "m30_bias": context.m30_bias,
+                "require_m30_alignment": self.trader_config.require_m30_alignment,
                 "market_phase": context.market_phase,
                 "warnings": context.warnings,
                 "phase_filtered": phase_filtered,
@@ -591,7 +591,7 @@ class FastTraderService:
                 "exec_result": result,
                 "context": {
                     "session": context.session_name,
-                    "h1_bias": context.h1_bias,
+                    "m30_bias": context.m30_bias,
                     "spread_pips": context.spread_pips,
                 },
                 "setup_meta": selected_setup.metadata,
@@ -696,13 +696,11 @@ class FastTraderService:
         positions = payload.get("positions", []) if isinstance(payload, dict) else []
         orders = payload.get("orders", []) if isinstance(payload, dict) else []
 
-        # Determine which positions/orders to EXCLUDE (explicit SMC / other-desk ownership).
-        # Fast desk takes custody of everything on this symbol unless the position is
-        # definitively owned by another desk (desk_owner=smc AND no fast-adoption marker).
-        # "inherited_fast" in ownership_status means fast desk already claimed the row —
-        # keep managing it regardless of the original desk_owner field.
-        smc_pos_ids: set[int] = set()
-        smc_order_ids: set[int] = set()
+        # Determine which positions/orders are inherited (need baseline protection)
+        # and which are within the adoption grace window.
+        # FAST operates only on what the desk-scoped payload already provides:
+        # fast_owned and inherited_fast tickets.  SMC tickets are never present
+        # in this payload — they are excluded upstream by account_payload_for_desk.
         inherited_pos_ids: set[int] = set()
         grace_pos_ids: set[int] = set()
         grace_order_ids: set[int] = set()
@@ -716,14 +714,19 @@ class FastTraderService:
                 status = str(row.get("ownership_status", "")).lower()
                 pos_id = int(row.get("position_id", 0) or row.get("mt5_position_id", 0) or 0)
                 ord_id = int(row.get("order_id", 0) or row.get("mt5_order_id", 0) or 0)
-                # Exclude only if owned by another desk AND not adopted by fast
-                if owner in {"smc"} and "fast" not in status:
-                    if pos_id > 0:
-                        smc_pos_ids.add(pos_id)
-                    if ord_id > 0:
-                        smc_order_ids.add(ord_id)
+                # Contract defence: ownership_open_ref for FAST should only return
+                # rows where desk_owner=="fast".  Any other row indicates a contract
+                # violation upstream — ignore and log; do not attempt to manage.
+                # NOTE: a legitimate inherited_fast row always has desk_owner="fast";
+                # desk_owner="smc" is invalid regardless of ownership_status.
+                if owner != "fast":
+                    logger.warning(
+                        "unexpected non-visible ticket in fast ownership ref: "
+                        "owner=%s status=%s pos_id=%s ord_id=%s — skipping",
+                        owner, status, pos_id or None, ord_id or None,
+                    )
                     continue
-                if owner == "fast" and status == "inherited_fast" and pos_id > 0:
+                if status == "inherited_fast" and pos_id > 0:
                     inherited_pos_ids.add(pos_id)
                     # Track first-seen inherited timestamp per runtime process so
                     # restarts still get a stabilization window even when DB
@@ -778,8 +781,6 @@ class FastTraderService:
             position_id = int(position.get("position_id", 0) or 0)
             if position_id > 0:
                 active_symbol_pos_ids.add(position_id)
-            if position_id in smc_pos_ids:  # belongs to SMC desk — do not touch
-                continue
 
             # Inherited operations must receive immediate baseline protection before
             # regular custody decisions (which may otherwise return "hold").
@@ -872,8 +873,6 @@ class FastTraderService:
                 if str(order.get("symbol", "")).upper() != symbol.upper():
                     continue
                 order_id = int(order.get("order_id", 0) or 0)
-                if order_id in smc_order_ids:  # belongs to SMC desk — do not touch
-                    continue
                 if order_id in grace_order_ids:  # recently adopted — observe before managing
                     continue
 

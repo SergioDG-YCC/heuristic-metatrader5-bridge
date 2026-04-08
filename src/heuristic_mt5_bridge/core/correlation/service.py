@@ -165,7 +165,7 @@ class CorrelationService:
         Only the upper triangle is computed — pairs are stored as (sym_a, sym_b)
         where sym_a < sym_b lexicographically.  ``get_pair`` resolves both orders.
         """
-        symbols = self._subscription_manager.subscribed_universe()
+        symbols = [symbol.upper() for symbol in self._subscription_manager.subscribed_universe()]
         pairs: dict[tuple[str, str], CorrelationPairValue] = {}
         computed_at = utc_now_iso()
 
@@ -180,6 +180,7 @@ class CorrelationService:
 
         return CorrelationMatrixSnapshot(
             timeframe=timeframe,
+            symbols=symbols,
             pairs=pairs,
             computed_at=computed_at,
             min_pair_bars=min_pair_bars,

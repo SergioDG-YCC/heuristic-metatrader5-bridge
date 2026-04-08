@@ -50,6 +50,7 @@ class CorrelationMatrixSnapshot:
     """
 
     timeframe: str
+    symbols: list[str] = field(default_factory=list)
     pairs: dict[tuple[str, str], CorrelationPairValue] = field(default_factory=dict)
     computed_at: str = ""
     min_pair_bars: int = 0

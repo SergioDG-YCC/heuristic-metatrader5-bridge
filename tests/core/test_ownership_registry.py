@@ -137,3 +137,68 @@ def test_pending_order_disappearance_is_filled_when_execution_evidence_exists(tm
     order_row_after = reg.get_by_order_id(606)
     assert order_row_after is not None
     assert order_row_after["lifecycle_status"] == "filled"
+
+
+def test_smc_pending_order_fill_preserves_desk_ownership(tmp_path: Path) -> None:
+    """Broker reuses the same ticket for the position that results from a filled
+    pending order.  The reconcile loop must find the SMC order row by that shared
+    ticket and promote it to a position row — NOT adopt it as inherited_fast."""
+    reg = _mk_registry(tmp_path / "runtime.db")
+
+    # SMC places a limit order; ownership registered at placement time.
+    reg.register_owned_operation(
+        operation_type="order",
+        owner="smc",
+        order_id=12345,
+        metadata={"symbol": "EURUSD", "side": "buy"},
+        reason="smc_execution_result",
+    )
+
+    order_row = reg.get_by_order_id(12345)
+    assert order_row is not None
+    assert order_row["desk_owner"] == "smc"
+
+    # Order fills: MT5 removes it from live orders and creates position #12345
+    # (broker reuses the same ticket number).
+    result = reg.reconcile_from_caches(
+        positions=[
+            {
+                "position_id": 12345,   # same ticket as the order
+                "symbol": "EURUSD",
+                "side": "buy",
+                "opened_at": "2026-04-06T10:00:00Z",
+            }
+        ],
+        orders=[],  # order gone from live orders (filled)
+    )
+
+    # The position must be owned by SMC — not inherited_fast.
+    pos_row = reg.get_by_position_id(12345)
+    assert pos_row is not None, "position row must exist after fill"
+    assert pos_row["desk_owner"] == "smc", "SMC ownership must be preserved after fill"
+    assert pos_row["ownership_status"] == "smc_owned"
+    assert pos_row["lifecycle_status"] == "active"
+    assert pos_row["operation_type"] == "position"
+    # Must NOT have been adopted as a foreign position.
+    assert result["adopted_positions"] == 0
+
+    # SMC worker can find its own position via list_open filtered by desk_owner.
+    smc_open = [r for r in reg.list_open() if r.get("desk_owner") == "smc"]
+    assert any(r.get("mt5_position_id") == 12345 for r in smc_open)
+
+    # Idempotent: next reconcile cycle must not re-adopt or change ownership.
+    result2 = reg.reconcile_from_caches(
+        positions=[
+            {
+                "position_id": 12345,
+                "symbol": "EURUSD",
+                "side": "buy",
+                "opened_at": "2026-04-06T10:00:00Z",
+            }
+        ],
+        orders=[],
+    )
+    assert result2["adopted_positions"] == 0
+    pos_row2 = reg.get_by_position_id(12345)
+    assert pos_row2 is not None
+    assert pos_row2["desk_owner"] == "smc"

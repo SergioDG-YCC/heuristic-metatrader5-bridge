@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MT5 Bridge — Terminal & Account Context</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+  :root {
+    --bg-base: #0e1014; --bg-panel: #151920; --bg-elevated: #1e2530;
+    --border-subtle: #252c38; --border-medium: #2f3847;
+    --text-primary: #e2e6ed; --text-secondary: #8c95a6; --text-muted: #5a6475;
+    --fast-teal: #2dd4a8; --fast-teal-dim: rgba(45,212,168,0.12);
+    --smc-blue: #5b8def; --smc-blue-dim: rgba(91,141,239,0.12);
+    --risk-amber: #f5a623; --risk-amber-dim: rgba(245,166,35,0.10);
+    --risk-red: #ef4444; --risk-red-dim: rgba(239,68,68,0.10);
+    --pnl-green: #22c55e; --pnl-green-dim: rgba(34,197,94,0.10);
+    --planned-slate: #3d4555; --planned-bg: rgba(61,69,85,0.18);
+    --terminal-cyan: #22d3ee; --terminal-cyan-dim: rgba(34,211,238,0.10);
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background: var(--bg-base); color: var(--text-primary); font-family: 'IBM Plex Sans', sans-serif; font-size: 11px; display: flex; height: 100vh; overflow: hidden; }
+
+  .nav-rail { width: 52px; background: var(--bg-panel); border-right: 1px solid var(--border-subtle); display: flex; flex-direction: column; align-items: center; padding: 12px 0; gap: 4px; flex-shrink: 0; }
+  .nav-logo { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; color: var(--fast-teal); margin-bottom: 12px; }
+  .nav-item { width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; border-radius: 4px; color: var(--text-muted); cursor: pointer; font-size: 14px; position: relative; }
+  .nav-item:hover { background: var(--bg-elevated); color: var(--text-secondary); }
+  .nav-item.active { background: var(--terminal-cyan-dim); color: var(--terminal-cyan); }
+  .nav-item.active::before { content:''; position:absolute; left:-8px; width:3px; height:18px; background:var(--terminal-cyan); border-radius:0 2px 2px 0; }
+  .nav-spacer { flex: 1; }
+
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .desk-accent { height: 3px; background: linear-gradient(90deg, var(--terminal-cyan), rgba(34,211,238,0.3), transparent); flex-shrink: 0; }
+
+  .status-strip { display: flex; align-items: center; gap: 6px; padding: 8px 16px; background: var(--bg-panel); border-bottom: 1px solid var(--border-subtle); flex-wrap: wrap; }
+  .ss-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 3px; font-family: 'JetBrains Mono', monospace; font-size: 9.5px; background: var(--bg-elevated); border: 1px solid var(--border-subtle); }
+  .ss-dot { width: 5px; height: 5px; border-radius: 50%; }
+  .ss-dot.up { background: var(--pnl-green); box-shadow: 0 0 4px var(--pnl-green); }
+  .ss-dot.warn { background: var(--risk-amber); box-shadow: 0 0 4px var(--risk-amber); }
+  .ss-label { color: var(--text-muted); }
+  .ss-value { color: var(--text-secondary); font-weight: 500; }
+  .ss-time { margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .live-pulse { animation: pulse 2s ease-in-out infinite; }
+
+  .content { flex: 1; display: grid; grid-template-columns: 1fr 1fr 280px; grid-template-rows: auto 1fr auto; gap: 6px; padding: 8px 10px; overflow-y: auto; }
+
+  .panel { background: var(--bg-panel); border: 1px solid var(--border-subtle); border-radius: 4px; overflow: hidden; display: flex; flex-direction: column; }
+  .panel-head { padding: 7px 12px; border-bottom: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+  .panel-title { font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
+  .accent-dot { width: 5px; height: 5px; border-radius: 50%; }
+  .panel-body { padding: 10px 12px; flex: 1; overflow-y: auto; }
+  .badge-planned { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; padding: 2px 6px; border-radius: 2px; background: var(--planned-bg); color: var(--planned-slate); border: 1px solid var(--planned-slate); }
+
+  /* Session Integrity */
+  .session-block { grid-column: 1 / 3; }
+  .integrity-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .integrity-card { background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 10px; position: relative; overflow: hidden; }
+  .integrity-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; }
+  .integrity-card.ok::before { background: var(--pnl-green); }
+  .integrity-card.warn::before { background: var(--risk-amber); }
+  .integrity-card.crit::before { background: var(--risk-red); }
+  .integrity-card .label { font-family: 'JetBrains Mono', monospace; font-size: 8px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+  .integrity-card .val { font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+  .integrity-card .detail { font-family: 'JetBrains Mono', monospace; font-size: 8.5px; color: var(--text-muted); }
+  .integrity-card .val.green { color: var(--pnl-green); }
+  .integrity-card .val.amber { color: var(--risk-amber); }
+  .integrity-card .val.red { color: var(--risk-red); }
+  .integrity-card .val.cyan { color: var(--terminal-cyan); }
+
+  /* AutoTrading Warnings */
+  .warnings-panel { grid-column: 3; grid-row: 1 / 3; }
+  .warning-box { padding: 8px 10px; border-radius: 3px; margin-bottom: 6px; font-family: 'JetBrains Mono', monospace; font-size: 9px; line-height: 1.5; border: 1px solid; }
+  .warning-box.red { background: var(--risk-red-dim); border-color: rgba(239,68,68,0.25); color: var(--risk-red); }
+  .warning-box.amber { background: var(--risk-amber-dim); border-color: rgba(245,166,35,0.2); color: var(--risk-amber); }
+  .warning-box.green { background: var(--pnl-green-dim); border-color: rgba(34,197,94,0.2); color: var(--pnl-green); }
+  .warning-box strong { font-weight: 700; }
+  .warning-icon { font-size: 12px; margin-right: 4px; }
+
+  /* Auth Safety */
+  .auth-panel { grid-column: 1; }
+  .auth-row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid rgba(37,44,56,0.3); font-family: 'JetBrains Mono', monospace; font-size: 9.5px; }
+  .auth-row .k { color: var(--text-muted); }
+  .auth-row .v { color: var(--text-secondary); }
+  .auth-row .v.ok { color: var(--pnl-green); }
+  .auth-row .v.warn { color: var(--risk-amber); }
+  .auth-row .v.crit { color: var(--risk-red); }
+  .auth-badge { display: inline-block; font-size: 8px; padding: 1px 5px; border-radius: 2px; font-weight: 600; text-transform: uppercase; }
+  .auth-badge.verified { background: var(--pnl-green-dim); color: var(--pnl-green); }
+  .auth-badge.mismatch { background: var(--risk-red-dim); color: var(--risk-red); }
+  .auth-badge.pending { background: var(--risk-amber-dim); color: var(--risk-amber); }
+
+  /* Recovery Checklist */
+  .recovery-panel { grid-column: 2; }
+  .check-item { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; border-bottom: 1px solid rgba(37,44,56,0.3); font-family: 'JetBrains Mono', monospace; font-size: 9px; }
+  .check-icon { width: 16px; height: 16px; border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; flex-shrink: 0; margin-top: 1px; }
+  .check-icon.pass { background: var(--pnl-green-dim); color: var(--pnl-green); border: 1px solid rgba(34,197,94,0.3); }
+  .check-icon.fail { background: var(--risk-red-dim); color: var(--risk-red); border: 1px solid rgba(239,68,68,0.25); }
+  .check-icon.skip { background: var(--planned-bg); color: var(--planned-slate); border: 1px solid var(--planned-slate); }
+  .check-content { flex: 1; }
+  .check-title { color: var(--text-primary); font-weight: 500; }
+  .check-desc { color: var(--text-muted); font-size: 8.5px; margin-top: 1px; }
+
+  /* Disruption History */
+  .disruption-panel { grid-column: 1 / 4; }
+  .data-table { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', monospace; font-size: 9.5px; }
+  .data-table th { text-align: left; color: var(--text-muted); font-weight: 500; padding: 4px 8px; border-bottom: 1px solid var(--border-subtle); font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .data-table td { padding: 4px 8px; color: var(--text-secondary); border-bottom: 1px solid rgba(37,44,56,0.35); }
+
+  .sev-chip { display: inline-block; font-size: 7.5px; padding: 1px 5px; border-radius: 2px; font-weight: 700; text-transform: uppercase; min-width: 38px; text-align: center; }
+  .sev-chip.crit { background: var(--risk-red-dim); color: var(--risk-red); }
+  .sev-chip.warn { background: var(--risk-amber-dim); color: var(--risk-amber); }
+  .sev-chip.info { background: var(--smc-blue-dim); color: var(--smc-blue); }
+
+  .footer-bar { padding: 6px 16px; border-top: 1px solid var(--border-subtle); display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--text-muted); background: var(--bg-panel); flex-shrink: 0; }
+</style>
+</head>
+<body>
+
+<nav class="nav-rail">
+  <div class="nav-logo">B</div>
+  <div class="nav-item">◉</div><div class="nav-item">☰</div><div class="nav-item">⚡</div><div class="nav-item">◆</div><div class="nav-item">⊞</div><div class="nav-item">⚑</div>
+  <div class="nav-item active">⊡</div>
+  <div class="nav-item">⇄</div>
+  <div class="nav-spacer"></div><div class="nav-item">⚙</div>
+</nav>
+
+<div class="main">
+  <div class="desk-accent"></div>
+  <div class="status-strip">
+    <div class="ss-chip"><span class="ss-dot up live-pulse"></span><span class="ss-label">Terminal</span><span class="ss-value" style="color:var(--terminal-cyan)">Connected</span></div>
+    <div class="ss-chip"><span class="ss-dot up"></span><span class="ss-label">AutoTrade</span><span class="ss-value" style="color:var(--pnl-green)">ON</span></div>
+    <div class="ss-chip"><span class="ss-dot warn live-pulse"></span><span class="ss-label">Session</span><span class="ss-value" style="color:var(--risk-amber)">Account Changed</span></div>
+    <div class="ss-chip"><span class="ss-label">Build</span><span class="ss-value">MT5 b4490</span></div>
+    <div class="ss-chip"><span class="ss-label">Uptime</span><span class="ss-value">4h 12m</span></div>
+    <div class="ss-time">14:32:18 UTC · Terminal Context</div>
+  </div>
+
+  <div class="content">
+    <!-- Session Integrity Cards -->
+    <div class="panel session-block">
+      <div class="panel-head">
+        <div class="panel-title"><span class="accent-dot" style="background:var(--terminal-cyan)"></span> Session Integrity</div>
+      </div>
+      <div class="panel-body">
+        <div class="integrity-grid">
+          <div class="integrity-card ok">
+            <div class="label">MT5 Connection</div>
+            <div class="val green">Connected</div>
+            <div class="detail">ICMarkets-Live07 · 12ms</div>
+          </div>
+          <div class="integrity-card ok">
+            <div class="label">AutoTrading Flag</div>
+            <div class="val green">Enabled</div>
+            <div class="detail">EA permissions active</div>
+          </div>
+          <div class="integrity-card warn">
+            <div class="label">Account Match</div>
+            <div class="val amber">#40817 ≠ #40812</div>
+            <div class="detail">Different from last session</div>
+          </div>
+          <div class="integrity-card ok">
+            <div class="label">Data Feed</div>
+            <div class="val green">Streaming</div>
+            <div class="detail">62 symbols · 0 gaps</div>
+          </div>
+          <div class="integrity-card ok">
+            <div class="label">SSE Channel</div>
+            <div class="val cyan">Active</div>
+            <div class="detail">ws://localhost:8080</div>
+          </div>
+          <div class="integrity-card ok">
+            <div class="label">API Auth</div>
+            <div class="val green">Valid</div>
+            <div class="detail">Token expires 18:00 UTC</div>
+          </div>
+          <div class="integrity-card ok">
+            <div class="label">Terminal Build</div>
+            <div class="val green">b4490</div>
+            <div class="detail">Compatible version</div>
+          </div>
+          <div class="integrity-card ok">
+            <div class="label">Disk / Logs</div>
+            <div class="val green">OK</div>
+            <div class="detail">2.4 GB free · logs rotating</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- AutoTrading & Terminal Warnings -->
+    <div class="panel warnings-panel">
+      <div class="panel-head">
+        <div class="panel-title"><span class="accent-dot" style="background:var(--risk-amber)"></span> Warnings</div>
+      </div>
+      <div class="panel-body">
+        <div class="warning-box amber">
+          <span class="warning-icon">⚠</span>
+          <strong>Account Context Change</strong><br>
+          Account #40817 differs from last session (#40812). Positions may be inherited. Verify broker/account match before enabling full execution.
+        </div>
+        <div class="warning-box green">
+          <span class="warning-icon">✓</span>
+          <strong>AutoTrading Active</strong><br>
+          MT5 AutoTrading flag is ON. All EA execution requests will be accepted by terminal.
+        </div>
+        <div class="warning-box amber">
+          <span class="warning-icon">⚠</span>
+          <strong>Token Expiry</strong><br>
+          API auth token expires at 18:00 UTC (~3h 28m). Renewal should be automatic, but monitor for auth failures.
+        </div>
+        <div class="warning-box green">
+          <span class="warning-icon">✓</span>
+          <strong>Data Feed Integrity</strong><br>
+          All 62 subscribed symbols streaming. No gaps detected in current session.
+        </div>
+        <div style="margin-top:8px;padding:6px 8px;border:1px dashed var(--planned-slate);border-radius:3px;font-family:'JetBrains Mono',monospace;font-size:8.5px;color:var(--planned-slate);">
+          <strong>Planned:</strong> Auto-pause execution on AutoTrading disable, auth failure, or account mismatch detection.
+        </div>
+      </div>
+    </div>
+
+    <!-- Auth Safety Panel -->
+    <div class="panel auth-panel">
+      <div class="panel-head">
+        <div class="panel-title"><span class="accent-dot" style="background:var(--pnl-green)"></span> Auth & Account Safety</div>
+      </div>
+      <div class="panel-body">
+        <div class="auth-row"><span class="k">Broker</span><span class="v">ICMarkets</span></div>
+        <div class="auth-row"><span class="k">Server</span><span class="v">ICMarkets-Live07</span></div>
+        <div class="auth-row"><span class="k">Account</span><span class="v" style="color:var(--terminal-cyan)">#40817</span></div>
+        <div class="auth-row"><span class="k">Previous Session</span><span class="v warn">#40812</span></div>
+        <div class="auth-row"><span class="k">Account Type</span><span class="v">Raw Spread · USD</span></div>
+        <div class="auth-row"><span class="k">Leverage</span><span class="v">1:500</span></div>
+        <div class="auth-row"><span class="k">Account Match</span><span class="v"><span class="auth-badge mismatch">Mismatch</span></span></div>
+        <div class="auth-row"><span class="k">Auth Token</span><span class="v"><span class="auth-badge verified">Valid</span></span></div>
+        <div class="auth-row"><span class="k">Token Expiry</span><span class="v warn">18:00 UTC</span></div>
+        <div class="auth-row"><span class="k">EA Permissions</span><span class="v ok">Granted</span></div>
+        <div class="auth-row"><span class="k">Trade Permission</span><span class="v ok">Enabled</span></div>
+        <div class="auth-row"><span class="k">DLL Imports</span><span class="v ok">Allowed</span></div>
+      </div>
+    </div>
+
+    <!-- Recovery Checklist -->
+    <div class="panel recovery-panel">
+      <div class="panel-head">
+        <div class="panel-title"><span class="accent-dot" style="background:var(--terminal-cyan)"></span> Startup / Recovery Checklist</div>
+      </div>
+      <div class="panel-body">
+        <div class="check-item">
+          <span class="check-icon pass">✓</span>
+          <div class="check-content"><div class="check-title">MT5 terminal reachable</div><div class="check-desc">Connection established, 12ms latency</div></div>
+        </div>
+        <div class="check-item">
+          <span class="check-icon pass">✓</span>
+          <div class="check-content"><div class="check-title">AutoTrading enabled</div><div class="check-desc">Flag verified ON in terminal settings</div></div>
+        </div>
+        <div class="check-item">
+          <span class="check-icon fail">✗</span>
+          <div class="check-content"><div class="check-title">Account matches previous session</div><div class="check-desc" style="color:var(--risk-amber)">#40817 ≠ #40812 — requires operator verification</div></div>
+        </div>
+        <div class="check-item">
+          <span class="check-icon pass">✓</span>
+          <div class="check-content"><div class="check-title">Data feed streaming</div><div class="check-desc">62/62 symbols active, no gaps</div></div>
+        </div>
+        <div class="check-item">
+          <span class="check-icon pass">✓</span>
+          <div class="check-content"><div class="check-title">SSE channel connected</div><div class="check-desc">Event stream active, last heartbeat 2s ago</div></div>
+        </div>
+        <div class="check-item">
+          <span class="check-icon pass">✓</span>
+          <div class="check-content"><div class="check-title">Chart workers initialized</div><div class="check-desc">10/10 workers started, 8 fresh, 2 stale</div></div>
+        </div>
+        <div class="check-item">
+          <span class="check-icon pass">✓</span>
+          <div class="check-content"><div class="check-title">Position inventory loaded</div><div class="check-desc">5 open positions, 3 pending orders synced</div></div>
+        </div>
+        <div class="check-item">
+          <span class="check-icon skip">—</span>
+          <div class="check-content"><div class="check-title">Ownership reconciliation</div><div class="check-desc" style="color:var(--planned-slate)">Planned — will verify desk assignments on startup</div></div>
+        </div>
+        <div class="check-item">
+          <span class="check-icon skip">—</span>
+          <div class="check-content"><div class="check-title">Risk budget re-validation</div><div class="check-desc" style="color:var(--planned-slate)">Planned — will confirm limits before enabling execution</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Disruption History -->
+    <div class="panel disruption-panel">
+      <div class="panel-head">
+        <div class="panel-title"><span class="accent-dot" style="background:var(--risk-red)"></span> Disruption History</div>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;color:var(--text-muted)">Last 7 days</span>
+      </div>
+      <div class="panel-body" style="padding:0;">
+        <table class="data-table">
+          <thead><tr><th>Timestamp</th><th>Severity</th><th>Type</th><th>Description</th><th>Duration</th><th>Impact</th><th>Recovery</th></tr></thead>
+          <tbody>
+            <tr><td>2026-03-24 10:18</td><td><span class="sev-chip warn">WARN</span></td><td>Account Change</td><td>Account switched from #40812 to #40817</td><td>—</td><td>Inherited positions</td><td>Manual verify</td></tr>
+            <tr><td>2026-03-23 16:42</td><td><span class="sev-chip crit">CRIT</span></td><td>AutoTrade Off</td><td>AutoTrading disabled by user action in MT5</td><td>4m 18s</td><td>3 orders rejected</td><td>Manual re-enable</td></tr>
+            <tr><td>2026-03-23 09:15</td><td><span class="sev-chip info">INFO</span></td><td>Reconnection</td><td>MT5 connection dropped, auto-reconnected</td><td>8s</td><td>None — no open orders</td><td>Automatic</td></tr>
+            <tr><td>2026-03-22 14:30</td><td><span class="sev-chip warn">WARN</span></td><td>Feed Gap</td><td>XAUUSD feed gap — 45s of missing ticks</td><td>45s</td><td>Stale chart data</td><td>Auto-resync</td></tr>
+            <tr><td>2026-03-21 11:00</td><td><span class="sev-chip warn">WARN</span></td><td>Token Expiry</td><td>API token expired, renewal delayed by 12s</td><td>12s</td><td>1 order delayed</td><td>Auto-renewal</td></tr>
+            <tr><td>2026-03-20 08:05</td><td><span class="sev-chip info">INFO</span></td><td>Planned Restart</td><td>Control plane restarted for config update</td><td>6s</td><td>Clean shutdown</td><td>Automatic</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer-bar">
+    <span>MT5 Bridge — Terminal & Account Context</span>
+    <span>Connected · AutoTrade ON · Account #40817 (mismatch)</span>
+    <span>Solid.js · v0.1-concept</span>
+  </div>
+</div>
+</body>
+</html>

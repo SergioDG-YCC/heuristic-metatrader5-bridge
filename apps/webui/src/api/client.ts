@@ -25,9 +25,15 @@ import type {
 
 const BACKEND = ""; // proxied through Vite dev server
 
-async function get<T>(path: string): Promise<T> {
+async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${BACKEND}${path}`, {
-    headers: { Accept: "application/json" },
+    cache: "no-store",
+    headers: {
+      Accept: "application/json",
+      "Cache-Control": "no-cache, no-store, max-age=0",
+      Pragma: "no-cache",
+    },
+    signal,
   });
   if (!res.ok) {
     throw new Error(`HTTP ${res.status} ${res.statusText} — ${path}`);
@@ -64,6 +70,11 @@ export const api = {
   account: () => get<AccountPayload>("/account"),
   positions: () =>
     get<{ positions: PositionRow[]; orders: OrderRow[] }>("/positions"),
+  // Desk-scoped operations endpoints (authoritative source for each desk UI)
+  fastOperations: () =>
+    get<{ positions: PositionRow[]; orders: OrderRow[]; updated_at: string }>("/api/v1/fast/operations"),
+  smcOperations: () =>
+    get<{ positions: PositionRow[]; orders: OrderRow[]; updated_at: string }>("/api/v1/smc/operations"),
   exposure: () => get<ExposureState>("/exposure"),
   catalog: () => get<CatalogResponse>("/catalog"),
   specs: () => get<Record<string, SymbolSpec>>("/specs"),
@@ -131,6 +142,9 @@ export const api = {
   setSymbolDesks: (symbol: string, desks: string[]) =>
     put<{ symbol: string; desks: string[] }>(`/api/v1/symbols/${symbol}/desks`, { desks }),
   // Correlation Engine
-  correlationMatrix: (timeframe: string) =>
-    get<CorrelationMatrixResponse>(`/api/v1/correlation/${timeframe}`),
+  correlationMatrix: (timeframe: string, signal?: AbortSignal) =>
+    get<CorrelationMatrixResponse>(
+      `/api/v1/correlation/${timeframe}?_ts=${Date.now()}`,
+      signal
+    ),
 };

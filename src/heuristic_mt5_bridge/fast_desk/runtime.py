@@ -112,7 +112,7 @@ class FastDeskConfig:
 
     spread_tolerance: str = "medium"  # "low" | "medium" | "high"
     max_slippage_pct: float = 0.05     # context gate: max tick-vs-candle % divergence
-    require_h1_alignment: bool = True
+    require_m30_alignment: bool = True
     enable_pending_orders: bool = True
     enable_structural_trailing: bool = True
     enable_atr_trailing: bool = True
@@ -142,7 +142,7 @@ class FastDeskConfig:
             min_rr=_getenv_alias_float("FAST_TRADER_MIN_RR", "FAST_DESK_MIN_RR", 3.0),
             spread_tolerance=_parse_spread_tolerance(),
             max_slippage_pct=_getenv_float("FAST_TRADER_MAX_SLIPPAGE_PCT", 0.05),
-            require_h1_alignment=_getenv_bool("FAST_TRADER_REQUIRE_H1_ALIGNMENT", True),
+            require_m30_alignment=_getenv_bool("FAST_TRADER_REQUIRE_M30_ALIGNMENT", True),
             enable_pending_orders=_getenv_bool("FAST_TRADER_ENABLE_PENDING_ORDERS", True),
             enable_structural_trailing=_getenv_bool("FAST_TRADER_ENABLE_STRUCTURAL_TRAILING", True),
             enable_atr_trailing=_getenv_bool("FAST_TRADER_ENABLE_ATR_TRAILING", True),
@@ -168,7 +168,7 @@ class FastDeskConfig:
             "min_rr": self.min_rr,
             "spread_tolerance": self.spread_tolerance,
             "max_slippage_pct": self.max_slippage_pct,
-            "require_h1_alignment": self.require_h1_alignment,
+            "require_m30_alignment": self.require_m30_alignment,
             "enable_pending_orders": self.enable_pending_orders,
             "enable_structural_trailing": self.enable_structural_trailing,
             "enable_atr_trailing": self.enable_atr_trailing,
@@ -200,7 +200,7 @@ class FastDeskService:
             self._context_config.spread_tolerance = cfg.spread_tolerance
             self._context_config.allowed_sessions = cfg.allowed_sessions
             self._context_config.max_slippage_pct = cfg.max_slippage_pct
-            self._context_config.require_h1_alignment = cfg.require_h1_alignment
+            self._context_config.require_m30_alignment = cfg.require_m30_alignment
             self._context_config.spread_thresholds = cfg.spread_thresholds
         if self._risk_config is not None:
             self._risk_config.risk_per_trade_percent = cfg.risk_per_trade_percent
@@ -220,7 +220,7 @@ class FastDeskService:
         if self._trader_config is not None:
             self._trader_config.signal_cooldown = cfg.signal_cooldown
             self._trader_config.enable_pending_orders = cfg.enable_pending_orders
-            self._trader_config.require_h1_alignment = cfg.require_h1_alignment
+            self._trader_config.require_m30_alignment = cfg.require_m30_alignment
             self._trader_config.adoption_grace_seconds = cfg.adoption_grace_seconds
 
     # ------------------------------------------------------------------
@@ -289,7 +289,7 @@ class FastDeskService:
             spread_tolerance=cfg.spread_tolerance,
             max_slippage_pct=cfg.max_slippage_pct,
             stale_feed_seconds=180,
-            require_h1_alignment=cfg.require_h1_alignment,
+            require_m30_alignment=cfg.require_m30_alignment,
             allowed_sessions=cfg.allowed_sessions,
             spread_thresholds=cfg.spread_thresholds,
         )
@@ -308,7 +308,7 @@ class FastDeskService:
         trader_config = FastTraderConfig(
             signal_cooldown=cfg.signal_cooldown,
             enable_pending_orders=cfg.enable_pending_orders,
-            require_h1_alignment=cfg.require_h1_alignment,
+            require_m30_alignment=cfg.require_m30_alignment,
             adoption_grace_seconds=cfg.adoption_grace_seconds,
         )
         self._risk_config = risk_config

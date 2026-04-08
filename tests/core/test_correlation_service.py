@@ -155,6 +155,7 @@ class TestCorrelationServiceAfterRefresh(unittest.TestCase):
         self.assertIsNotNone(matrix)
         self.assertIsInstance(matrix, CorrelationMatrixSnapshot)
         self.assertEqual(matrix.timeframe, "M5")
+        self.assertEqual(matrix.symbols, ["EURUSD", "GBPUSD"])
 
     def test_get_matrix_case_insensitive(self) -> None:
         self._refresh()
@@ -243,12 +244,14 @@ class TestElasticUniverse(unittest.TestCase):
 
         # First refresh — AUDUSD is not in universe yet
         snap1 = svc._refresh_timeframe("M5")
+        self.assertEqual(snap1.symbols, ["EURUSD", "GBPUSD"])
         self.assertNotIn(("EURUSD", "AUDUSD"), snap1.pairs)
         self.assertNotIn(("GBPUSD", "AUDUSD"), snap1.pairs)
 
         # Add AUDUSD to universe
         sm.replace(["EURUSD", "GBPUSD", "AUDUSD"])
         snap2 = svc._refresh_timeframe("M5")
+        self.assertEqual(snap2.symbols, ["EURUSD", "GBPUSD", "AUDUSD"])
         # Some pair with AUDUSD should now exist
         self.assertTrue(
             any("AUDUSD" in key for key in snap2.pairs.keys())

@@ -275,6 +275,7 @@ class SmcTraderService:
         thesis: dict[str, Any] | None,
         pip_size: float,
         connector: Any,
+        candles: list[dict[str, Any]] | None = None,
         mt5_execute_sync: Callable | None = None,
     ) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
@@ -284,6 +285,7 @@ class SmcTraderService:
                 thesis=thesis,
                 pip_size=pip_size,
                 scaled_out_ids=self._scaled_out_ids,
+                candles=candles,
             )
 
             pos_id = decision.position_id
@@ -345,8 +347,23 @@ class SmcTraderService:
                         mt5_execute_sync=mt5_execute_sync,
                     )
                     actions.append({"action": "moved_sl_be", "position_id": pos_id, "result": result})
-                    logger.info("[%s] moved SL to BE for position %d", symbol, pos_id)
+                    logger.info("[%s] moved SL to BE for position %d", symbol, pos_id, decision.reason)
                 except Exception as exc:
                     logger.error("[%s] move SL BE position %d error: %s", symbol, pos_id, exc)
+
+            elif decision.action == "trail_sl" and decision.new_sl is not None:
+                try:
+                    result = self.execution.modify_position_levels(
+                        connector,
+                        symbol=symbol,
+                        position_id=pos_id,
+                        stop_loss=decision.new_sl,
+                        take_profit=None,
+                        mt5_execute_sync=mt5_execute_sync,
+                    )
+                    actions.append({"action": "trailed_sl", "position_id": pos_id, "reason": decision.reason, "result": result})
+                    logger.info("[%s] trailed SL for position %d to %.5f: %s", symbol, pos_id, decision.new_sl, decision.reason)
+                except Exception as exc:
+                    logger.error("[%s] trail SL position %d error: %s", symbol, pos_id, exc)
 
         return actions

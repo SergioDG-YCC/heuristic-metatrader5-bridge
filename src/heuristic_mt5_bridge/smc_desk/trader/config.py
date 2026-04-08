@@ -19,6 +19,11 @@ class SmcTraderConfig:
     min_rr_ratio: float = 1.5
     bias_change_cooldown_seconds: float = 3600.0
     entry_zone_buffer_pips: float = 2.0
+    # Breakeven and trailing (post-entry risk management)
+    be_trigger_r: float = 1.0          # move SL to entry when profit >= 1×R
+    enable_trailing: bool = True
+    trailing_trigger_r: float = 2.0    # start trailing when profit >= 2×R
+    trailing_atr_multiplier: float = 2.0  # trail distance = ATR × multiplier (H4-based)
 
     @classmethod
     def from_env(cls) -> SmcTraderConfig:
@@ -35,4 +40,8 @@ class SmcTraderConfig:
             min_rr_ratio=float(os.getenv("SMC_TRADER_MIN_RR_RATIO", "1.5")),
             bias_change_cooldown_seconds=float(os.getenv("SMC_TRADER_BIAS_CHANGE_COOLDOWN_SECONDS", "3600")),
             entry_zone_buffer_pips=float(os.getenv("SMC_TRADER_ENTRY_ZONE_BUFFER_PIPS", "2.0")),
+            be_trigger_r=float(os.getenv("SMC_TRADER_BE_TRIGGER_R", "1.0")),
+            enable_trailing=os.getenv("SMC_TRADER_ENABLE_TRAILING", "true").strip().lower() in ("true", "1", "yes"),
+            trailing_trigger_r=float(os.getenv("SMC_TRADER_TRAILING_TRIGGER_R", "2.0")),
+            trailing_atr_multiplier=float(os.getenv("SMC_TRADER_TRAILING_ATR_MULTIPLIER", "2.0")),
         )

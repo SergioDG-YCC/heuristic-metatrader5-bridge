@@ -4,6 +4,7 @@ import type {
   AccountPayload,
   CatalogEntry,
   SymbolSpec,
+  OwnershipItem,
 } from "../types/api";
 import { api } from "../api/client";
 
@@ -12,6 +13,7 @@ interface TerminalStore {
   catalog: CatalogEntry[];
   specs: Record<string, SymbolSpec>;
   selectedSpec: SymbolSpec | null;
+  ownershipByOrderId: Record<number, OwnershipItem>;
   loading: boolean;
   error: string | null;
 }
@@ -21,6 +23,7 @@ const [state, setState] = createStore<TerminalStore>({
   catalog: [],
   specs: {},
   selectedSpec: null,
+  ownershipByOrderId: {},
   loading: false,
   error: null,
 });
@@ -28,6 +31,7 @@ const [state, setState] = createStore<TerminalStore>({
 export { state as terminalStore };
 
 let _pollId: ReturnType<typeof setInterval> | null = null;
+let _ownershipPollId: ReturnType<typeof setInterval> | null = null;
 
 async function loadCatalog() {
   try {
@@ -66,15 +70,30 @@ export async function loadSpec(symbol: string): Promise<void> {
   }
 }
 
+async function pollOwnership() {
+  try {
+    const [open, hist] = await Promise.all([api.ownershipOpen(), api.ownershipHistory()]);
+    const byOrd: Record<number, OwnershipItem> = {};
+    for (const item of [...(open.items ?? []), ...(hist.items ?? [])]) {
+      if (item.order_id != null) byOrd[item.order_id] = item;
+    }
+    setState("ownershipByOrderId", byOrd);
+  } catch {
+    // non-critical
+  }
+}
+
 export function initTerminalStore() {
   setState("loading", true);
-  Promise.all([loadCatalog(), loadSpecs(), pollAccount()]).finally(() => {
+  Promise.all([loadCatalog(), loadSpecs(), pollAccount(), pollOwnership()]).finally(() => {
     setState("loading", false);
   });
 
   _pollId = setInterval(pollAccount, 10_000);
+  _ownershipPollId = setInterval(pollOwnership, 15_000);
 
   onCleanup(() => {
     if (_pollId !== null) clearInterval(_pollId);
+    if (_ownershipPollId !== null) clearInterval(_ownershipPollId);
   });
 }

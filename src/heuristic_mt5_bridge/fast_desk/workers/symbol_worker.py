@@ -84,7 +84,7 @@ class FastSymbolWorker:
         trader_cfg = trader_config or FastTraderConfig(
             signal_cooldown=float(config.signal_cooldown),
             enable_pending_orders=True,
-            require_h1_alignment=True,
+            require_m30_alignment=True,
         )
         self._trader = FastTraderService(
             trader_config=trader_cfg,

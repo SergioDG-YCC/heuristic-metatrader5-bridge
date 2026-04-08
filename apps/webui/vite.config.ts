@@ -39,7 +39,17 @@ export default defineConfig({
       "/api/v1/fast": { target: "http://127.0.0.1:8765", changeOrigin: true },
       "/api/v1/smc": { target: "http://127.0.0.1:8765", changeOrigin: true },
       "/api/v1/symbols": { target: "http://127.0.0.1:8765", changeOrigin: true },
-      "/api/v1/correlation": { target: "http://127.0.0.1:8765", changeOrigin: true },
+      "/api/v1/correlation": {
+        target: "http://127.0.0.1:8765",
+        changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on("proxyRes", (proxyRes) => {
+            proxyRes.headers["cache-control"] = "no-cache, no-store, max-age=0";
+            proxyRes.headers.pragma = "no-cache";
+            proxyRes.headers.expires = "0";
+          });
+        },
+      },
     },
   },
   build: {

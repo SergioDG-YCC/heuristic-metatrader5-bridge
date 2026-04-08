@@ -67,7 +67,7 @@ class FastDeskDynamicWorkersTest(unittest.IsolatedAsyncioTestCase):
         )
         service._setup_config = FastSetupConfig(rr_ratio=3.0)
         service._risk_config = FastRiskConfig(risk_per_trade_percent=1.0, max_positions_per_symbol=1, max_positions_total=4)
-        service._trader_config = FastTraderConfig(signal_cooldown=60.0, enable_pending_orders=True, require_h1_alignment=True)
+        service._trader_config = FastTraderConfig(signal_cooldown=60.0, enable_pending_orders=True, require_m30_alignment=True)
 
         updated = FastDeskConfig(rr_ratio=4.2, risk_per_trade_percent=1.5, signal_cooldown=15.0, max_positions_total=6)
         service.update_context_config(updated)

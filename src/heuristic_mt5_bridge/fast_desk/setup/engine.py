@@ -64,7 +64,7 @@ class FastSetupEngine:
         candles_m5: list[dict[str, Any]],
         candles_htf: list[dict[str, Any]] | None = None,
         pip_size: float,
-        h1_bias: str,
+        m30_bias: str,
         spread_pips: float = 0.0,
         htf_zones: list[dict[str, Any]] | None = None,
         # Backward compat alias
@@ -153,7 +153,7 @@ class FastSetupEngine:
                 atr=atr,
                 pip_size=pip_size,
                 rr=cfg.rr_ratio,
-                h1_bias=h1_bias,
+                m30_bias=m30_bias,
             )
         )
 
@@ -174,7 +174,7 @@ class FastSetupEngine:
 
         # Phase 4: Bias alignment penalty (soft, not blocking)
         for s in filtered:
-            if h1_bias in {"buy", "sell"} and s.side != h1_bias:
+            if m30_bias in {"buy", "sell"} and s.side != m30_bias:
                 penalty = 0.88 if bool(s.metadata.get("zone_reaction")) else 0.75
                 s.confidence = round(s.confidence * penalty, 4)
 
@@ -833,7 +833,7 @@ class FastSetupEngine:
         atr: float,
         pip_size: float,
         rr: float,
-        h1_bias: str,
+        m30_bias: str,
     ) -> list[FastSetup]:
         setups: list[FastSetup] = []
         setup = self._wedge_retest(symbol, candles_m5, latest_close, atr, pip_size, rr)
@@ -842,7 +842,7 @@ class FastSetupEngine:
         setup = self._flag_retest(symbol, candles_m5, latest_close, atr, pip_size, rr)
         if setup:
             setups.append(setup)
-        setup = self._triangle_retest(symbol, candles_m5, latest_close, atr, pip_size, rr, h1_bias)
+        setup = self._triangle_retest(symbol, candles_m5, latest_close, atr, pip_size, rr, m30_bias)
         if setup:
             setups.append(setup)
         setup = self._sr_polarity_retest(symbol, candles_m5, latest_close, atr, pip_size, rr)
@@ -978,7 +978,7 @@ class FastSetupEngine:
         atr: float,
         pip_size: float,
         rr: float,
-        h1_bias: str,
+        m30_bias: str,
     ) -> FastSetup | None:
         sample = candles[-16:]
         if len(sample) < 16:
@@ -992,7 +992,7 @@ class FastSetupEngine:
         contraction = (highs[0] - lows[0]) > (highs[-1] - lows[-1]) * 1.25
         if not (descending_highs and ascending_lows and contraction):
             return None
-        side = h1_bias if h1_bias in {"buy", "sell"} else ("buy" if latest_close >= (sum(highs[-4:]) / 4.0) else "sell")
+        side = m30_bias if m30_bias in {"buy", "sell"} else ("buy" if latest_close >= (sum(highs[-4:]) / 4.0) else "sell")
         level = latest_close
         stop_loss = (min(lows[-6:]) - atr * 0.15) if side == "buy" else (max(highs[-6:]) + atr * 0.15)
         return self._make_setup(

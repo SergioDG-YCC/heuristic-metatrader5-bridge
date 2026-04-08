@@ -139,6 +139,9 @@ class SmcSymbolWorker:
         if m1:
             current_price = float(m1[-1].get("close", 0) or current_price)
 
+        # H4 candles for ATR-based trailing stop in custody
+        candles_h4 = market_state.get_candles(symbol, "H4", 20)
+
         if current_price <= 0:
             return
 
@@ -162,6 +165,7 @@ class SmcSymbolWorker:
                 thesis=thesis,
                 pip_size=float(pip_size),
                 connector=connector,
+                candles=candles_h4,
                 mt5_execute_sync=_mt5_sync,
             )
 

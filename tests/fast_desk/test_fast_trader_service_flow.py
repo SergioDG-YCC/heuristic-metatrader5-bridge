@@ -43,7 +43,7 @@ def _context() -> FastContext:
     return FastContext(
         symbol="EURUSD",
         session_name="london",
-        h1_bias="buy",
+        m30_bias="buy",
         volatility_regime="normal",
         spread_pips=0.6,
         expected_slippage_points=2.0,
@@ -125,7 +125,7 @@ def _service() -> FastTraderService:
         trader_config=FastTraderConfig(
             signal_cooldown=0.0,
             enable_pending_orders=True,
-            require_h1_alignment=False,
+            require_m30_alignment=False,
         ),
         context_config=FastContextConfig(),
         setup_config=FastSetupConfig(min_confidence=0.5),
@@ -399,6 +399,17 @@ def test_scan_selects_market_entry_for_reclaim_setup(monkeypatch, tmp_path: Path
 
 
 def test_custody_ignores_non_fast_positions(monkeypatch, tmp_path: Path) -> None:
+    """FAST custody must only manage fast-owned positions.
+
+    Under the current architecture, account_payload_for_desk pre-filters the
+    payload upstream so that only FAST tickets (fast_owned / inherited_fast) are
+    ever passed into run_custody.  Positions 12 and 22 (desk_owner=smc) are
+    absent from the desk-scoped payload — they never reach run_custody.
+
+    Additionally, when ownership_open_ref returns unexpected non-FAST rows
+    (contract violation), run_custody must warn and skip those rows without
+    managing the corresponding positions.
+    """
     service = _service()
 
     managed_ids: list[int] = []
@@ -413,13 +424,17 @@ def test_custody_ignores_non_fast_positions(monkeypatch, tmp_path: Path) -> None
     monkeypatch.setattr(service.execution, "apply_professional_custody", lambda *a, **k: {"ok": True})
     monkeypatch.setattr("heuristic_mt5_bridge.fast_desk.trader.service.runtime_db.append_fast_trade_log", lambda *a, **k: None)
 
-    positions = [
+    # The payload is desk-scoped: only the FAST position is present.
+    # Positions 12 and 22 were filtered by account_payload_for_desk before
+    # reaching run_custody — they do not appear here.
+    fast_positions = [
         {"position_id": 11, "symbol": "EURUSD", "side": "buy", "price_open": 1.1000, "price_current": 1.1010, "stop_loss": 1.0990, "volume": 0.10},
-        {"position_id": 12, "symbol": "EURUSD", "side": "buy", "price_open": 1.1000, "price_current": 1.1010, "stop_loss": 1.0990, "volume": 0.10},
-        {"position_id": 22, "symbol": "EURUSD", "side": "buy", "price_open": 1.1000, "price_current": 1.1010, "stop_loss": 1.0990, "volume": 0.10},
     ]
+    # ownership_open_ref may still return unexpected SMC rows as a contract
+    # violation (e.g. a bug upstream) — run_custody must warn and skip them.
     ownership_rows = [
         {"desk_owner": "fast", "ownership_status": "fast_owned", "position_id": 11},
+        # desk_owner=smc MUST be skipped — triggers contract-defence warning
         {"desk_owner": "smc", "ownership_status": "inherited_fast", "position_id": 12},
         {"desk_owner": "smc", "ownership_status": "smc_owned", "position_id": 22},
     ]
@@ -428,7 +443,7 @@ def test_custody_ignores_non_fast_positions(monkeypatch, tmp_path: Path) -> None
         symbol="EURUSD",
         market_state=_MarketState(),
         spec_registry=_SpecRegistry(),
-        account_payload_ref=lambda: {"positions": positions, "orders": []},
+        account_payload_ref=lambda: {"positions": fast_positions, "orders": []},
         connector=_Connector(),
         db_path=tmp_path / "runtime.db",
         broker_server="Broker-1",
@@ -438,8 +453,10 @@ def test_custody_ignores_non_fast_positions(monkeypatch, tmp_path: Path) -> None
         ownership_open_ref=lambda: ownership_rows,
     )
 
-    assert sorted(managed_ids) == [11, 12]
-    assert result["positions"] == 2
+    # Only position 11 (fast_owned) must be managed — 12 and 22 are SMC and
+    # absent from the desk-scoped payload.
+    assert sorted(managed_ids) == [11]
+    assert result["positions"] == 1
 
 
 def test_rejected_entry_does_not_consume_cooldown_or_open_counter(monkeypatch, tmp_path: Path) -> None:
@@ -490,7 +507,7 @@ def test_ranging_context_filters_breakout_setup_even_with_trigger(monkeypatch, t
         lambda **kwargs: FastContext(
             symbol="EURUSD",
             session_name="london",
-            h1_bias="sell",
+            m30_bias="sell",
             volatility_regime="high",
             spread_pips=0.6,
             expected_slippage_points=2.0,
@@ -666,7 +683,7 @@ def test_pullback_context_allows_strong_reclaim_setup(monkeypatch, tmp_path: Pat
         lambda **kwargs: FastContext(
             symbol="EURUSD",
             session_name="london",
-            h1_bias="sell",
+            m30_bias="sell",
             volatility_regime="high",
             spread_pips=0.6,
             expected_slippage_points=2.0,

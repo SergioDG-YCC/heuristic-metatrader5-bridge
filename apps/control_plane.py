@@ -359,13 +359,48 @@ async def account() -> dict[str, Any]:
 
 @app.get("/positions")
 async def positions() -> dict[str, Any]:
-    """Returns open positions list + pending orders list."""
+    """Returns open positions list + pending orders list (global broker view, audit console)."""
     svc = _require_service()
     if not isinstance(svc.account_payload, dict):
         return {"positions": [], "orders": []}
     return {
         "positions": svc.account_payload.get("positions") or [],
         "orders": svc.account_payload.get("orders") or [],
+    }
+
+
+@app.get("/api/v1/fast/operations")
+async def fast_operations() -> dict[str, Any]:
+    """Returns positions and orders visible to the FAST desk only.
+
+    Filters by ownership: desk_owner==\"fast\" or
+    ownership_status in {\"fast_owned\", \"inherited_fast\"}.
+    This endpoint is the authoritative data source for the Fast Desk UI.
+    Use /positions for the global broker audit view.
+    """
+    svc = _require_service()
+    payload = svc.account_payload_for_desk(desk="fast")
+    return {
+        "positions": payload.get("positions") or [],
+        "orders": payload.get("orders") or [],
+        "updated_at": utc_now_iso(),
+    }
+
+
+@app.get("/api/v1/smc/operations")
+async def smc_operations() -> dict[str, Any]:
+    """Returns positions and orders visible to the SMC desk only.
+
+    Filters by ownership: desk_owner==\"smc\" or ownership_status==\"smc_owned\".
+    This endpoint is the authoritative data source for the SMC Desk UI.
+    Use /positions for the global broker audit view.
+    """
+    svc = _require_service()
+    payload = svc.account_payload_for_desk(desk="smc")
+    return {
+        "positions": payload.get("positions") or [],
+        "orders": payload.get("orders") or [],
+        "updated_at": utc_now_iso(),
     }
 
 
@@ -1488,7 +1523,7 @@ async def get_correlation_matrix(timeframe: str) -> dict[str, Any]:
         "min_pair_bars": matrix.min_pair_bars,
         "all_pairs_coverage_ok": matrix.all_pairs_coverage_ok,
         "computed_at": matrix.computed_at,
-        "symbols": svc.correlation_service.active_symbols(),
+        "symbols": matrix.symbols,
     }
 
 

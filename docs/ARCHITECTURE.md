@@ -12,6 +12,7 @@
 > **SMC LLM pipeline audit**: delivered 2026-04-02 — sequential dispatch (no concurrent GPU saturation), `_LLM_GATE` lock, config wiring fix, prompt cache, operational logging
 > **SMC Trader activation**: delivered 2026-04-03 — 6 new modules (config, entry_policy, pending, service, custody, worker), risk-based lot sizing via `FastRiskEngine`, RiskKernel profile integration, WebUI toggle, dynamic reconciliation loop
 > **Correlation engine**: delivered 2026-04-05 — `CorrelationService` computing Pearson matrices per timeframe (M5/M30/H1), `FastCorrelationPolicy` for implicit hedge + inverse concentration detection, `SmcCorrelationFormatter` for LLM context enrichment, WebUI heatmap with stale source visibility; all 5 runtime wiring changes complete; 203 tests passing
+> **FAST/SMC ticket isolation**: delivered 2026-04-07 — `account_payload_for_desk()` filters the global MT5 snapshot per desk before any desk logic runs; FAST blacklist (`smc_pos_ids`/`smc_order_ids`) removed and replaced with positive allowlist (`fast_owned` + `inherited_fast`); desk-scoped control plane endpoints `/api/v1/fast/operations` and `/api/v1/smc/operations`; WebUI Fast Desk and SMC Desk consume desk-scoped stores; 16 new isolation tests; 44 regression tests passing
 
 ---
 
@@ -45,7 +46,7 @@ Fast execution now runs through `FastTraderService` with explicit layered contra
 5. Entry routing: retests prefer `pending`; reclaim/displacement prefer `market`.
 6. `FastPendingManager` controls pending lifecycle (`modify_order_levels` / `remove_order`).
 7. `FastCustodyEngine` applies professional custody (break-even, ATR trailing, structural trailing, hard cut, no passive underwater, optional scale-out).
-8. Custody scope is restricted to `fast_owned` and `inherited_fast`; no intervention over SMC-owned operations.
+8. Custody scope is restricted to `fast_owned` and `inherited_fast`. FAST never sees, enumerates, or manages SMC-owned tickets — the broker snapshot is pre-filtered by `account_payload_for_desk(desk="fast")` before any desk logic runs. The custody loop asserts this contract and logs a warning if an unexpected non-FAST row appears in `ownership_open_ref`.
 9. Runtime integration uses `RiskKernel` and `OwnershipRegistry` as authorities through `CoreRuntimeService` hooks.
 
 ### Context gates (v0.3.4)
@@ -405,11 +406,13 @@ graph LR
     CP --> E2["GET /chart/symbol/tf\nRAM candles + context"]
     CP --> E3["GET /specs\nGET /specs/symbol"]
     CP --> E4["GET /account\nraw account payload"]
-    CP --> E5["GET /positions\npositions + orders list"]
+    CP --> E5["GET /positions\npositions + orders list (global broker view)"]
     CP --> E6["GET /exposure\naggregate by symbol"]
     CP --> E7["GET /catalog\nbroker symbol catalog"]
     CP --> E8["POST /subscribe\nPOST /unsubscribe"]
     CP --> E9["GET /events?interval=1.0\nSSE live stream"]
+    CP --> E10["GET /api/v1/fast/operations\nFAST desk-scoped positions + orders"]
+    CP --> E11["GET /api/v1/smc/operations\nSMC desk-scoped positions + orders"]
 ```
 
 Ownership and risk operational surface (same control plane, no extra external interface):
@@ -654,6 +657,76 @@ MT5 terminal(s)
           -> Fast Desk Runtime
           -> SMC Desk Runtime
 ```
+
+---
+
+## Ticket isolation: FAST vs SMC
+
+### Principle
+
+Both desks share one MT5 connection and one `OwnershipRegistry`, but they operate on strictly disjoint ticket sets. The isolation is implemented as **positive allowlist, not blacklist**: each desk receives only the positions and orders it owns before any desk logic runs.
+
+### Ticket ownership taxonomy
+
+| `ownership_status` | `desk_owner` | Meaning |
+|---|---|---|
+| `fast_owned` | `fast` | Position or order placed by the FAST desk |
+| `smc_owned` | `smc` | Position or order placed by the SMC desk |
+| `inherited_fast` | `fast` | External/manual ticket adopted by FAST (e.g. human-opened position) |
+| `unassigned` | `unassigned` | Unknown — pending first reconciliation cycle |
+
+> `inherited_fast` means external to the stack (opened manually by a human trader). SMC tickets are **never** classified as `inherited_fast` — they have their own `smc_owned` row.
+
+### Isolation flow
+
+```text
+MT5 broker snapshot (global: all positions + orders)
+        │
+        ▼
+ownership_registry.reconcile_from_caches()
+  ← labels every ticket: fast_owned / smc_owned / inherited_fast
+        │
+        ├─► account_payload_for_desk(desk="fast")
+        │     filter: desk_owner=="fast" OR ownership_status in {"fast_owned","inherited_fast"}
+        │     result: only FAST tickets visible
+        │
+        └─► account_payload_for_desk(desk="smc")
+              filter: desk_owner=="smc" OR ownership_status=="smc_owned"
+              result: only SMC tickets visible
+                │                     │
+                ▼                     ▼
+        FastTraderService       SmcDeskService
+        run_custody()           run_smc_scan()
+```
+
+FAST custody adds a second-layer contract defence: if `ownership_open_ref` returns a row where `desk_owner != "fast"`, it logs a WARNING and skips the row without managing the position. This guards against upstream misconfiguration but must never trigger in normal operation.
+
+### OwnershipRegistry guards
+
+| Transition | Behaviour |
+|---|---|
+| Unknown ticket appears in MT5 snapshot | `reconcile_from_caches` adopts as `inherited_fast` (if `auto_adopt_foreign=True`) |
+| SMC ticket reappears in reconcile after being known | Row found by `get_by_position_id` → no reclassification |
+| `reassign(smc → fast)` called | `ValueError("reassigning from smc to fast is not allowed")` — hard block |
+| `account_payload_for_desk(desk="fast")` called without `ownership_registry` | Falls back to global payload (safe degraded mode at startup) |
+
+### Environment variables
+
+| Variable | Canonical | Legacy alias | Default |
+|---|---|---|---|
+| Auto-adopt external tickets | `RISK_ADOPT_FOREIGN_POSITIONS` | `OWNERSHIP_AUTO_ADOPT_FOREIGN` | `true` |
+
+Both names are accepted; the canonical name takes precedence; the alias is a fallback for existing `.env` files.
+
+### Desk-scoped WebUI endpoints
+
+| Endpoint | Payload |
+|---|---|
+| `GET /api/v1/fast/operations` | `{positions, orders, updated_at}` — FAST-visible only |
+| `GET /api/v1/smc/operations` | `{positions, orders, updated_at}` — SMC-visible only |
+| `GET /positions` | Global broker view — for audit consoles only |
+
+Fast Desk (`apps/webui/src/routes/FastDesk.tsx`) polls `/api/v1/fast/operations` via `fastOperationsStore`. SMC Desk polls `/api/v1/smc/operations` via `smcOperationsStore`. Neither route reads from the global `operationsStore` for position data.
 
 ---
 

@@ -540,6 +540,217 @@ class TestSmcAnalyst(unittest.TestCase):
             db_path.unlink(missing_ok=True)
 
 
+# ---------------------------------------------------------------------------
+# Test: SMC Custody — thesis state must not close live positions
+# ---------------------------------------------------------------------------
+
+class TestSmcCustodyThesisIsolation(unittest.TestCase):
+    """Open positions must survive thesis state changes (gone/rejected/watching).
+
+    The SL/TP set at entry are the exit mechanism.  Custody only acts on
+    hard_cut (emergency) and tp1/tp2 scale-out logic.
+    """
+
+    def _pos(self, side: str = "sell", open_price: float = 1.1600,
+             current_price: float = 1.1560, sl: float = 1.1700) -> dict[str, Any]:
+        return {
+            "position_id": 999,
+            "side": side,
+            "price_open": open_price,
+            "price_current": current_price,
+            "stop_loss": sl,
+            "volume": 0.10,
+        }
+
+    def _thesis_active(self) -> dict[str, Any]:
+        return {
+            "status": "active",
+            "bias": "sell",
+            "validator_decision": "approve",
+            "operation_candidates": [{
+                "side": "sell",
+                "take_profit_1": 1.1480,
+                "take_profit_2": 1.1400,
+                "stop_loss": 1.1700,
+            }],
+        }
+
+    def setUp(self) -> None:
+        from heuristic_mt5_bridge.smc_desk.trader.config import SmcTraderConfig
+        from heuristic_mt5_bridge.smc_desk.trader.custody import SmcCustodyEngine
+        self.engine = SmcCustodyEngine(SmcTraderConfig())
+
+    def test_thesis_gone_does_not_close_position(self) -> None:
+        decision = self.engine.evaluate_position(
+            position=self._pos(), thesis=None, pip_size=0.0001, scaled_out_ids=set()
+        )
+        self.assertEqual(decision.action, "hold",
+                         f"Expected hold when thesis is None, got {decision.action}: {decision.reason}")
+
+    def test_thesis_rejected_does_not_close_position(self) -> None:
+        thesis = self._thesis_active()
+        thesis["validator_decision"] = "reject"
+        decision = self.engine.evaluate_position(
+            position=self._pos(), thesis=thesis, pip_size=0.0001, scaled_out_ids=set()
+        )
+        self.assertEqual(decision.action, "hold",
+                         f"Expected hold when thesis rejected, got {decision.action}: {decision.reason}")
+
+    def test_thesis_watching_does_not_close_position(self) -> None:
+        thesis = self._thesis_active()
+        thesis["status"] = "watching"
+        decision = self.engine.evaluate_position(
+            position=self._pos(), thesis=thesis, pip_size=0.0001, scaled_out_ids=set()
+        )
+        self.assertEqual(decision.action, "hold",
+                         f"Expected hold when thesis=watching, got {decision.action}: {decision.reason}")
+
+    def test_hard_cut_still_fires_when_far_underwater(self) -> None:
+        """hard_cut is the emergency backstop and must still work."""
+        thesis = self._thesis_active()
+        # SELL at 1.1600, SL at 1.1700 (100 pips risk). Price moves 200 pips against us.
+        pos = self._pos(side="sell", open_price=1.1600, current_price=1.1800, sl=1.1700)
+        decision = self.engine.evaluate_position(
+            position=pos, thesis=thesis, pip_size=0.0001, scaled_out_ids=set()
+        )
+        self.assertEqual(decision.action, "close",
+                         f"Expected hard_cut close, got {decision.action}: {decision.reason}")
+        self.assertIn("hard_cut", decision.reason)
+
+    def test_tp2_reached_closes_position(self) -> None:
+        thesis = self._thesis_active()
+        # SELL: price reaches tp2=1.1400
+        pos = self._pos(side="sell", open_price=1.1600, current_price=1.1395, sl=1.1700)
+        decision = self.engine.evaluate_position(
+            position=pos, thesis=thesis, pip_size=0.0001, scaled_out_ids=set()
+        )
+        self.assertEqual(decision.action, "close")
+        self.assertEqual(decision.reason, "tp2_reached")
+
+
+# ---------------------------------------------------------------------------
+# Test: SMC Custody — breakeven and trailing
+# ---------------------------------------------------------------------------
+
+class TestSmcCustodyBreakevenAndTrailing(unittest.TestCase):
+    """BE triggers at be_trigger_r×R; trailing kicks in at trailing_trigger_r×R."""
+
+    def setUp(self) -> None:
+        from heuristic_mt5_bridge.smc_desk.trader.config import SmcTraderConfig
+        from heuristic_mt5_bridge.smc_desk.trader.custody import SmcCustodyEngine
+        self.cfg = SmcTraderConfig(
+            be_trigger_r=1.0,
+            enable_trailing=True,
+            trailing_trigger_r=2.0,
+            trailing_atr_multiplier=2.0,
+        )
+        self.engine = SmcCustodyEngine(self.cfg)
+
+    def _thesis(self) -> dict[str, Any]:
+        return {
+            "status": "active",
+            "bias": "buy",
+            "validator_decision": "approve",
+            "operation_candidates": [{
+                "side": "buy",
+                "take_profit_1": 1.1300,
+                "take_profit_2": 1.1500,
+                "stop_loss": 1.0900,
+            }],
+        }
+
+    def _candles_h4(self, count: int = 20, atr_size: float = 0.0100) -> list[dict[str, Any]]:
+        """Synthetic H4 candles with predictable ATR (≈ atr_size)."""
+        out = []
+        price = 1.1000
+        for i in range(count):
+            out.append({
+                "open": price,
+                "high": price + atr_size,
+                "low": price,
+                "close": price + atr_size * 0.5,
+            })
+            price += 0.0001
+        return out
+
+    def test_breakeven_triggers_at_1r(self) -> None:
+        """BE fires when profit ≥ 1×R and SL is still below entry."""
+        # BUY at 1.1000, SL at 1.0900 (100 pip risk). Price at 1.1101 = 101 pips = 1.01R
+        pos = {
+            "position_id": 200,
+            "side": "buy",
+            "price_open": 1.1000,
+            "price_current": 1.1101,
+            "stop_loss": 1.0900,
+            "volume": 0.10,
+        }
+        decision = self.engine.evaluate_position(
+            position=pos, thesis=self._thesis(), pip_size=0.0001, scaled_out_ids=set()
+        )
+        self.assertEqual(decision.action, "move_sl_be",
+                         f"Expected move_sl_be, got {decision.action}: {decision.reason}")
+        self.assertAlmostEqual(decision.new_sl, 1.1000, places=4)
+        self.assertIn("breakeven_trigger", decision.reason)
+
+    def test_no_breakeven_below_threshold(self) -> None:
+        """Below 1R profit — no BE fired."""
+        pos = {
+            "position_id": 201,
+            "side": "buy",
+            "price_open": 1.1000,
+            "price_current": 1.1050,  # 50 pips = 0.5R → below threshold
+            "stop_loss": 1.0900,
+            "volume": 0.10,
+        }
+        decision = self.engine.evaluate_position(
+            position=pos, thesis=self._thesis(), pip_size=0.0001, scaled_out_ids=set()
+        )
+        self.assertEqual(decision.action, "hold",
+                         f"Expected hold below BE threshold, got {decision.action}")
+
+    def test_trailing_triggers_at_2r_with_candles(self) -> None:
+        """Trailing fires at 2R profit when SL is already at entry (BE done)."""
+        # BUY at 1.1000, SL already moved to entry (1.1000). Price at 1.1210 = 210 pips = 2.1R
+        pos = {
+            "position_id": 202,
+            "side": "buy",
+            "price_open": 1.1000,
+            "price_current": 1.1210,
+            "stop_loss": 1.1000,  # already at BE
+            "volume": 0.10,
+        }
+        candles = self._candles_h4(atr_size=0.0100)  # ATR ≈ 100 pips
+        decision = self.engine.evaluate_position(
+            position=pos, thesis=self._thesis(), pip_size=0.0001,
+            scaled_out_ids=set(), candles=candles,
+        )
+        self.assertEqual(decision.action, "trail_sl",
+                         f"Expected trail_sl, got {decision.action}: {decision.reason}")
+        self.assertIn("trailing", decision.reason)
+        # Trail SL should be below current price
+        self.assertIsNotNone(decision.new_sl)
+        self.assertLess(decision.new_sl, 1.1210)  # type: ignore[operator]
+
+    def test_trailing_not_fire_if_be_not_set(self) -> None:
+        """Trailing must not fire if SL is still below entry (BE not yet triggered)."""
+        # 2.5R profit but SL still at original level (no BE done)
+        pos = {
+            "position_id": 203,
+            "side": "buy",
+            "price_open": 1.1000,
+            "price_current": 1.1250,
+            "stop_loss": 1.0900,  # original SL, not yet at BE
+            "volume": 0.10,
+        }
+        decision = self.engine.evaluate_position(
+            position=pos, thesis=self._thesis(), pip_size=0.0001,
+            scaled_out_ids=set(), candles=self._candles_h4(),
+        )
+        # Should fire BE (1R threshold already passed), not trail
+        self.assertEqual(decision.action, "move_sl_be",
+                         f"Expected BE before trailing with original SL, got {decision.action}")
+
+
 if __name__ == "__main__":
     unittest.main()
 

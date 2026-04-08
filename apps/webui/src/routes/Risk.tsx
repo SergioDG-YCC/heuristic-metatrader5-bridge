@@ -38,7 +38,7 @@ const Risk: Component = () => {
 
   const maxExpVol = () => {
     const syms = exp()?.symbols ?? [];
-    return syms.reduce((mx, r) => Math.max(mx, Math.abs(Number(r.gross_volume ?? 0))), 0) || 1;
+    return syms.reduce((mx, r) => Math.max(mx, Math.abs(Number(r.net_volume ?? 0))), 0) || 1;
   };
 
   const [riskStatus, { refetch: refetchRisk }] = createResource<RiskStatusPayload>(() => api.riskStatus());
@@ -144,21 +144,26 @@ const Risk: Component = () => {
               <For each={exp()?.symbols ?? []}>
                 {(row) => {
                   const net = Number(row.net_volume ?? 0);
-                  const gross = Number(row.gross_volume ?? 0);
-                  const pct = Math.min(Math.abs(gross) / maxExpVol() * 45, 45);
+                  const pct = Math.min(Math.abs(net) / maxExpVol() * 45, 45);
                   const isLong = net >= 0;
                   const pnl = Number(row.floating_profit ?? 0);
+                  const barColor = pnl >= 0 ? "var(--green)" : "var(--red)";
                   return (
                     <div class="exp-row">
                       <span class="exp-sym">{String(row.symbol ?? "—")}</span>
                       <div class="exp-track">
                         <div class="exp-center" />
-                        <Show when={isLong}>
-                          <div class="exp-bar-long" style={{ width: `${pct}%` }} />
-                        </Show>
-                        <Show when={!isLong}>
-                          <div class="exp-bar-short" style={{ width: `${pct}%` }} />
-                        </Show>
+                        <div
+                          style={{
+                            position: "absolute",
+                            ...(isLong ? { left: "50%" } : { right: "50%" }),
+                            height: "100%",
+                            width: `${pct}%`,
+                            background: barColor,
+                            opacity: "0.65",
+                            "border-radius": isLong ? "0 2px 2px 0" : "2px 0 0 2px",
+                          }}
+                        />
                       </div>
                       <span class="exp-val" style={{ color: pnl >= 0 ? "var(--green)" : "var(--red)" }}>
                         {pnl >= 0 ? "+" : ""}{numStr(row.floating_profit, 2)}

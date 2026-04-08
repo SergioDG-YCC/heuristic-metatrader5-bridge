@@ -273,6 +273,8 @@ a:hover {
   color: var(--text-secondary);
   border-bottom: 1px solid rgba(37,44,56,0.35);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .data-table tr:hover td { background: rgba(34,211,238,0.02); }
 .td-buy  { color: var(--green) !important; font-weight: 600; }

@@ -9,7 +9,7 @@ from heuristic_mt5_bridge.smc_desk.trader.config import SmcTraderConfig
 
 @dataclass
 class SmcCustodyDecision:
-    action: str  # "hold", "close", "scale_out", "move_sl_be", "close_invalidated"
+    action: str  # "hold", "close", "scale_out", "move_sl_be", "trail_sl", "close_invalidated"
     position_id: int = 0
     reason: str = ""
     new_sl: float | None = None
@@ -30,6 +30,7 @@ class SmcCustodyEngine:
         thesis: dict[str, Any] | None,
         pip_size: float,
         scaled_out_ids: set[int],
+        candles: list[dict[str, Any]] | None = None,
     ) -> SmcCustodyDecision:
         pos_id = int(position.get("position_id", 0) or 0)
         if pos_id <= 0:
@@ -44,30 +45,12 @@ class SmcCustodyEngine:
         if open_price <= 0 or current_price <= 0 or pip_size <= 0:
             return SmcCustodyDecision(action="hold", position_id=pos_id, reason="missing_price_data")
 
-        if thesis is None:
-            return SmcCustodyDecision(
-                action="close",
-                position_id=pos_id,
-                reason="thesis_gone",
-            )
-
-        validator = str(thesis.get("validator_decision", "")).lower()
-        if validator == "reject":
-            return SmcCustodyDecision(
-                action="close_invalidated",
-                position_id=pos_id,
-                reason="thesis_rejected",
-            )
-
-        status = str(thesis.get("status", "")).lower()
-        if status == "watching":
-            return SmcCustodyDecision(
-                action="close_invalidated",
-                position_id=pos_id,
-                reason="thesis_downgraded_watching",
-            )
-
-        candidates = thesis.get("operation_candidates", [])
+        # Once a position is open, the SL/TP set at entry are the exit mechanism.
+        # Thesis state changes (gone, rejected, watching) reflect pre-entry analysis
+        # updates and must NOT close a live position — that would guarantee losses
+        # every time the LLM revises its view mid-trade.
+        # Only hard_cut (structural emergency) and tp1/tp2 scale logic act post-entry.
+        candidates = thesis.get("operation_candidates", []) if thesis is not None else []
         cand = candidates[0] if candidates else {}
 
         tp1 = float(cand.get("take_profit_1", 0) or 0)
@@ -123,6 +106,46 @@ class SmcCustodyEngine:
                     new_sl=open_price,
                 )
 
+        # Breakeven: when profit >= be_trigger_r × risk, move SL to entry
+        # (only if SL is not already at or better than entry)
+        be_sl_already = False
+        if current_sl > 0:
+            if side == "buy":
+                be_sl_already = current_sl >= open_price
+            else:
+                be_sl_already = current_sl <= open_price
+        if not be_sl_already and profit_pips >= risk_pips * self._config.be_trigger_r:
+            return SmcCustodyDecision(
+                action="move_sl_be",
+                position_id=pos_id,
+                reason=f"breakeven_trigger:{profit_pips:.1f}p>={risk_pips * self._config.be_trigger_r:.1f}p",
+                new_sl=open_price,
+            )
+
+        # Trailing stop: after BE is in place, trail the SL using H4 ATR
+        if (
+            self._config.enable_trailing
+            and be_sl_already
+            and profit_pips >= risk_pips * self._config.trailing_trigger_r
+        ):
+            atr = self._atr(candles or [], 14) if candles else 0.0
+            if atr <= 0:
+                # Fallback: use risk_pips as ATR proxy (1R distance)
+                atr = risk_pips * pip_size
+            trail_dist = atr * self._config.trailing_atr_multiplier
+            if side == "buy":
+                trail_sl = current_price - trail_dist
+            else:
+                trail_sl = current_price + trail_dist
+            if self._is_tighter(side, trail_sl, current_sl):
+                return SmcCustodyDecision(
+                    action="trail_sl",
+                    position_id=pos_id,
+                    reason=f"trailing:{profit_pips:.1f}p>={risk_pips * self._config.trailing_trigger_r:.1f}p",
+                    new_sl=round(trail_sl, 10),
+                    metadata={"atr": round(atr, 6)},
+                )
+
         return SmcCustodyDecision(action="hold", position_id=pos_id, reason="monitoring")
 
     @staticmethod
@@ -136,3 +159,26 @@ class SmcCustodyEngine:
         if raw_type in (1, "1", "sell", "short"):
             return "sell"
         return "buy"
+
+    @staticmethod
+    def _atr(candles: list[dict[str, Any]], period: int) -> float:
+        if len(candles) < 2:
+            return 0.0
+        trs: list[float] = []
+        for idx in range(1, len(candles)):
+            high = float(candles[idx].get("high", 0.0) or 0.0)
+            low = float(candles[idx].get("low", 0.0) or 0.0)
+            prev_close = float(candles[idx - 1].get("close", 0.0) or 0.0)
+            trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+        if not trs:
+            return 0.0
+        window = trs[-period:] if len(trs) >= period else trs
+        return sum(window) / len(window)
+
+    @staticmethod
+    def _is_tighter(side: str, candidate_sl: float, current_sl: float) -> bool:
+        if current_sl <= 0:
+            return True
+        if side == "buy":
+            return candidate_sl > current_sl
+        return candidate_sl < current_sl

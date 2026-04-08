@@ -129,9 +129,11 @@ la alerta de recuperacion (re-habilitar AutoTrading en el terminal MT5).
 
 ### 3. Riesgo y ownership
 
-- el ownership formal Fast/SMC todavia no esta terminado (`OwnershipRegistry` pendiente)
-- el risk kernel global todavia no existe
-- la UI no debe vender controles inexistentes como si fueran reales
+- el `OwnershipRegistry` esta operativo: clasifica tickets como `fast_owned`, `smc_owned`, `inherited_fast`
+- el `RiskKernel` esta operativo: kill-switch, presupuesto, perfil por desk
+- los endpoints de ownership y risk estan disponibles en el control plane
+- los endpoints desk-scoped (`/api/v1/fast/operations`, `/api/v1/smc/operations`) aislan completamente FAST de SMC
+- la UI debe consumir esos endpoints para representar operaciones por desk, no el endpoint global `/positions`
 
 ### 4. Cambio de cuenta
 
@@ -203,18 +205,39 @@ Debe leer, como minimo:
 4. `docs/audit/2026-03-24_mt5_official_surface_inventory.md`
 5. `docs/prompts/CONNECTOR_EXECUTION_SURFACE_CONSTRUCTOR.md`
 
-**Estado de superficie backend a la fecha (2026-03-24):**
+**Estado de superficie backend a la fecha (2026-04-07):**
 
 | Componente | Estado |
 |---|---|
 | Control Plane HTTP | ✅ operativo |
 | MT5Connector — lectura | ✅ certificado |
 | MT5Connector — escritura (5 metodos) | ✅ cerrado en 0.2.1 |
-| Fast Desk execution (bridge canonico) | ✅ alineado en 0.2.1 |
-| Fast Desk preflight (`trade_allowed`) | ✅ activo en 0.2.1 |
-| OwnershipRegistry | ⏳ pendiente |
-| RiskKernel (global + por desk) | ⏳ pendiente |
-| FastTraderService (ejecucion real) | ⏳ pendiente |
-| SmcTraderService | ⏳ pendiente |
+| Fast Desk execution (bridge canonico) | ✅ operativo |
+| Fast Desk preflight (`trade_allowed`) | ✅ activo |
+| OwnershipRegistry | ✅ operativo (ownership + reconcile + adoption) |
+| RiskKernel (global + por desk) | ✅ operativo |
+| FastTraderService (ejecucion real) | ✅ operativo — 6-phase pipeline, deterministic |
+| SmcTraderService | ✅ operativo — reconciliation loop, lot sizing, custody |
+| Correlation engine | ✅ operativo — Pearson M5/M30/H1, heatmap WebUI |
+| **Ticket isolation FAST/SMC** | ✅ implementado — allowlist positiva, stores por desk |
+| `/api/v1/fast/operations` | ✅ disponible — FAST-scoped positions + orders |
+| `/api/v1/smc/operations` | ✅ disponible — SMC-scoped positions + orders |
+| `fastOperationsStore` | ✅ disponible — FastDesk.tsx ya consume este store |
+| `smcOperationsStore` | ✅ disponible — SmcDesk.tsx ya consume este store |
 | BridgeSupervisor (multi-terminal) | ⏳ pendiente |
 | Paper mode | ⏳ pendiente |
+
+### Contrato de datos por desk (2026-04-07)
+
+La WebUI nunca debe usar `/positions` (vista global del broker) para representar
+operaciones de un desk especifico. Las vistas de Fast Desk y SMC Desk deben
+consumir sus endpoints aislados:
+
+| Endpoint | Para quien |
+|---|---|
+| `GET /api/v1/fast/operations` | FastDesk.tsx — solo tickets `fast_owned` + `inherited_fast` |
+| `GET /api/v1/smc/operations` | SmcDesk.tsx — solo tickets `smc_owned` |
+| `GET /positions` | Consola de auditoria global — no para vistas operativas por desk |
+
+El store global `operationsStore` puede seguir usandose para la consola de auditoria.
+No debe aparecer en los componentes de Fast Desk ni SMC Desk.

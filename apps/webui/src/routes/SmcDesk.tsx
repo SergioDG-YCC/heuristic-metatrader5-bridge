@@ -13,6 +13,7 @@ import {
 } from "lightweight-charts";
 import { runtimeStore } from "../stores/runtimeStore";
 import { operationsStore, initOperationsStore } from "../stores/operationsStore";
+import { smcOperationsStore, initSmcOperationsStore } from "../stores/smcOperationsStore";
 import { fetchChart, getChartEntry } from "../stores/chartsStore";
 import { api } from "../api/client";
 import type { SmcThesis, SmcZone, SmcEventRow, Candle, CatalogEntry } from "../types/api";
@@ -516,6 +517,7 @@ const SmcDesk: Component = () => {
 
   onMount(() => {
     initOperationsStore();
+    initSmcOperationsStore();
     loadSmcDeskData();
     pollSmcData();
     dataTimer = setInterval(pollSmcData, 10_000);
@@ -675,7 +677,8 @@ const SmcDesk: Component = () => {
   }
 
   const snap = () => runtimeStore.snapshot;
-  const positions = () => operationsStore.positions;
+  // Use desk-scoped store for positions — only smc_owned tickets.
+  const positions = () => smcOperationsStore.positions;
 
   return (
     <>

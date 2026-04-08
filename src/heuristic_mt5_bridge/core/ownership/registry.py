@@ -266,6 +266,44 @@ class OwnershipRegistry:
                 continue
             existing = self.get_by_position_id(position_id)
             if not existing:
+                # Broker reuses the same ticket number for the resulting position
+                # when a pending order fills.  Try to find the order row (same
+                # ticket) before treating this position as an unknown foreign one.
+                existing_order = self.get_by_order_id(position_id)
+                if existing_order:
+                    # Promote the order row to a position row, preserving desk ownership.
+                    # mt5_order_id is cleared to avoid a unique-index conflict with the
+                    # original order row (still present until the open_rows loop marks
+                    # it as "filled" later in this same reconcile call).
+                    # Traceability is preserved via the event log (previous_uid).
+                    old_uid = existing_order.get("operation_uid")
+                    existing_order["operation_uid"] = self._operation_uid(
+                        "position", position_id=position_id, order_id=None
+                    )
+                    existing_order["operation_type"] = "position"
+                    existing_order["mt5_position_id"] = position_id
+                    existing_order["mt5_order_id"] = None
+                    existing_order["lifecycle_status"] = "active"
+                    existing_order["last_seen_open_at"] = now_iso
+                    existing_order["updated_at"] = now_iso
+                    if not existing_order.get("opened_at"):
+                        existing_order["opened_at"] = str(pos.get("opened_at", "")).strip() or None
+                    self._upsert_row(existing_order)
+                    self._append_event(
+                        operation_uid=existing_order["operation_uid"],
+                        event_type="order_filled_promoted",
+                        from_owner=existing_order.get("desk_owner"),
+                        to_owner=existing_order.get("desk_owner"),
+                        from_status=existing_order.get("ownership_status"),
+                        to_status=existing_order.get("ownership_status"),
+                        reason="pending_order_filled_same_ticket",
+                        payload={
+                            "position_id": position_id,
+                            "previous_uid": old_uid,
+                            "symbol": str(pos.get("symbol", "")).upper(),
+                        },
+                    )
+                    continue
                 if not self.auto_adopt_foreign:
                     continue
                 adopted_positions += 1
@@ -276,6 +314,10 @@ class OwnershipRegistry:
                     "operation_type": "position",
                     "mt5_position_id": position_id,
                     "mt5_order_id": None,
+                    # ``inherited_fast`` means: ticket external to the stack (e.g. opened
+                    # manually by a human trader).  Tickets created by the SMC desk are
+                    # never reclassified as ``inherited_fast`` — they have their own
+                    # ``smc_owned`` row and are found by get_by_position_id above.
                     "desk_owner": "fast",
                     "ownership_status": "inherited_fast",
                     "lifecycle_status": "active",
@@ -329,6 +371,9 @@ class OwnershipRegistry:
                     "operation_type": "order",
                     "mt5_position_id": None,
                     "mt5_order_id": order_id,
+                    # ``inherited_fast`` means: pending order external to the stack (e.g.
+                    # placed manually).  SMC-owned pending orders have their own
+                    # ``smc_owned`` row and are found by get_by_order_id above.
                     "desk_owner": "fast",
                     "ownership_status": "inherited_fast",
                     "lifecycle_status": "active",

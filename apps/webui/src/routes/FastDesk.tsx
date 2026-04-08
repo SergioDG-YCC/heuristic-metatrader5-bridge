@@ -13,6 +13,7 @@ import {
 } from "lightweight-charts";
 import { runtimeStore } from "../stores/runtimeStore";
 import { operationsStore, initOperationsStore } from "../stores/operationsStore";
+import { fastOperationsStore, initFastOperationsStore } from "../stores/fastOperationsStore";
 import { fetchChart, getChartEntry } from "../stores/chartsStore";
 import { api } from "../api/client";
 import type {
@@ -245,7 +246,8 @@ const FastDesk: Component = () => {
 
   const snap = () => runtimeStore.snapshot;
   const exp = () => operationsStore.exposure;
-  const positions = () => operationsStore.positions as PositionRow[];
+  // Use desk-scoped store for positions and orders — only fast_owned/inherited_fast tickets.
+  const positions = () => fastOperationsStore.positions as PositionRow[];
   const acct = () => operationsStore.account?.account_state;
 
   const availableSymbols = createMemo(() =>
@@ -539,6 +541,7 @@ const FastDesk: Component = () => {
 
   onMount(() => {
     initOperationsStore();
+    initFastOperationsStore();
     loadFastDeskData();
     pollActivity();
     pollSignals();

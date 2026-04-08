@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from heuristic_mt5_bridge.fast_desk.setup.engine import FastSetupConfig, FastSetupEngine
 from heuristic_mt5_bridge.fast_desk.trigger.engine import FastTriggerEngine
@@ -340,7 +340,7 @@ def test_detect_setups_boosts_htf_confluence(monkeypatch) -> None:
         candles_m5=_m5_candles(80, 1.1000),
         candles_h1=_m5_candles(80, 1.1000),
         pip_size=0.0001,
-        h1_bias="buy",
+        m30_bias="buy",
         htf_zones=[{"zone_type": "ob_bullish", "side": "buy", "price_high": 1.1010, "price_low": 1.0990}],
     )
     assert out
@@ -395,7 +395,7 @@ def test_detect_setups_keeps_effective_rr_above_internal_floor(monkeypatch) -> N
         candles_m5=candles_m5,
         candles_h1=candles_h1,
         pip_size=0.0001,
-        h1_bias="buy",
+        m30_bias="buy",
         spread_pips=0.4,
     )
 

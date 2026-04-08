@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
@@ -78,7 +78,7 @@ def _ok_context() -> FastContext:
     return FastContext(
         symbol="EURUSD",
         session_name="london",
-        h1_bias="buy",
+        m30_bias="buy",
         volatility_regime="normal",
         spread_pips=0.6,
         expected_slippage_points=2.0,
@@ -95,7 +95,7 @@ def test_pending_manager_cancels_when_context_gate_fails() -> None:
     bad_ctx = FastContext(
         symbol="EURUSD",
         session_name="tokyo",
-        h1_bias="neutral",
+        m30_bias="neutral",
         volatility_regime="low",
         spread_pips=3.5,
         expected_slippage_points=55.0,

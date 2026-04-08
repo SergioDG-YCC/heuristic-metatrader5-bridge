@@ -17,6 +17,9 @@ class FastCustodyPolicyConfig:
     enable_scale_out: bool = False
     scale_out_r: float = 2.5
     atr_trailing_multiplier: float = 1.3
+    # Scalping quick-profit trail: kick in early and follow price tightly
+    quick_trail_r: float = 0.5
+    quick_trail_atr_multiplier: float = 0.5
 
 
 @dataclass
@@ -85,9 +88,25 @@ class FastCustodyEngine:
                 reason=f"hard_cut:{loss_pips:.2f}p>{risk_pips * self.config.hard_cut_r:.2f}p",
             )
 
-        # No passive underwater: losing + opposite H1 bias.
-        if loss_pips > risk_pips * 0.55 and ((context.h1_bias == "buy" and side == "sell") or (context.h1_bias == "sell" and side == "buy")):
-            return FastCustodyDecision(action="close", position_id=pos_id, reason="no_passive_underwater")
+        # Scalping quick-profit trail: follow price tightly as soon as we have
+        # 0.5R in pocket.  Uses a very tight ATR multiplier (0.5) from M1 so
+        # the desk captures the move without waiting for full TP.
+        atr_m1 = max(self._atr(candles_m1, 14), pip_size * 5)
+        if profit_pips > 0 and profit_pips >= risk_pips * self.config.quick_trail_r:
+            quick_sl = self._atr_stop(
+                side=side,
+                current_price=current_price,
+                atr=atr_m1,
+                multiplier=self.config.quick_trail_atr_multiplier,
+            )
+            if self._is_tighter(side, quick_sl, current_sl):
+                return FastCustodyDecision(
+                    action="trail_atr",
+                    position_id=pos_id,
+                    reason=f"quick_trail:{profit_pips:.2f}p>={risk_pips * self.config.quick_trail_r:.2f}p",
+                    new_sl=round(quick_sl, 10),
+                    metadata={"atr_m1": atr_m1},
+                )
 
         # Optional scale out.
         if (

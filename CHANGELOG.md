@@ -8,6 +8,66 @@ Versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — FAST/SMC ticket isolation: positive allowlist + desk-scoped operations (2026-04-07)
+
+Full end-to-end isolation between FAST and SMC desks at the ticket level. FAST no longer receives, enumerates, or manages SMC-owned tickets. The separation is enforced upstream by `account_payload_for_desk()` before any desk logic runs.
+
+#### Core runtime (`core/runtime/service.py`)
+
+- **`CoreRuntimeService.ownership_visible_ids_for_desk(*, desk)`** — queries `ownership_registry.list_open()` and returns `{position_ids: set, order_ids: set}` filtered to the desk's positive allowlist:
+  - `desk="fast"`: `desk_owner=="fast"` OR `ownership_status in {"fast_owned","inherited_fast"}`
+  - `desk="smc"`: `desk_owner=="smc"` OR `ownership_status=="smc_owned"`
+- **`CoreRuntimeService.account_payload_for_desk(*, desk)`** — returns a filtered copy of `account_payload` containing only the desk's visible positions and orders. Falls back to global payload when `ownership_registry is None` (safe degraded mode at bootstrap).
+- **`run_forever()` injection changed**: both desks now receive desk-scoped payload lambdas instead of the global `account_payload` reference.
+- **`CoreRuntimeConfig.load()`**: added legacy env alias — `OWNERSHIP_AUTO_ADOPT_FOREIGN=true` in existing `.env` files is now honoured as fallback to canonical `RISK_ADOPT_FOREIGN_POSITIONS`.
+
+#### FAST desk custody — blacklist removed (`fast_desk/trader/service.py`)
+
+- **Removed** `smc_pos_ids` / `smc_order_ids` sets and all code that built them.
+- **Removed** `if owner == "smc":` block, `if position_id in smc_pos_ids: continue`, `if order_id in smc_order_ids: continue`.
+- **Added** contract defence: any row in `ownership_open_ref` with `desk_owner != "fast"` triggers a WARNING log and is skipped. A legitimate `inherited_fast` row always has `desk_owner="fast"`; `desk_owner="smc"` is a contract violation regardless of `ownership_status`.
+
+#### Ownership registry (`core/ownership/registry.py`)
+
+- Added clarifying comments in `reconcile_from_caches()`: `inherited_fast` = external/manual ticket (e.g. human-opened). SMC tickets are never reclassified as `inherited_fast` — they have their own `smc_owned` row found before the adoption branch.
+- Existing `reassign()` guard preserved: `ValueError` when `previous_owner=="smc"` and `target_owner=="fast"`.
+
+#### Control Plane — desk-scoped endpoints (`apps/control_plane.py`)
+
+- **`GET /api/v1/fast/operations`** — returns `{positions, orders, updated_at}` filtered to FAST-visible tickets only.
+- **`GET /api/v1/smc/operations`** — returns `{positions, orders, updated_at}` filtered to SMC-visible tickets only.
+- `GET /positions` retained unchanged as global broker view (audit consoles).
+
+#### WebUI — desk-scoped stores and routes
+
+- **`apps/webui/src/api/client.ts`** — added `fastOperations()` → `GET /api/v1/fast/operations` and `smcOperations()` → `GET /api/v1/smc/operations`.
+- **`apps/webui/src/stores/fastOperationsStore.ts`** (new) — SolidJS reactive store polling `/api/v1/fast/operations` every 3 s. Exports `fastOperationsStore`, `initFastOperationsStore`.
+- **`apps/webui/src/stores/smcOperationsStore.ts`** (new) — SolidJS reactive store polling `/api/v1/smc/operations` every 3 s. Exports `smcOperationsStore`, `initSmcOperationsStore`.
+- **`apps/webui/src/routes/FastDesk.tsx`** — positions now sourced from `fastOperationsStore` (desk-scoped); `initFastOperationsStore()` called in `onMount`.
+- **`apps/webui/src/routes/SmcDesk.tsx`** — positions now sourced from `smcOperationsStore` (desk-scoped); `initSmcOperationsStore()` called in `onMount`.
+
+#### Documentation
+
+- **`docs/ARCHITECTURE.md`** — status banner updated; FastTraderService item 8 clarified; `Ticket isolation: FAST vs SMC` section added (taxonomy, isolation flow, registry guards, env vars, WebUI endpoints); Control Plane diagram updated with two new endpoints.
+- **`docs/FAST_SMC_TICKET_ISOLATION.md`** (new) — full design reference: problem statement, positive-allowlist design, code changes per file, test inventory, regression baseline, residual risks.
+
+#### Tests
+
+- **`tests/core/test_desk_payload_isolation.py`** (new, 7 tests) — `account_payload_for_desk` payload isolation: `smc_owned` absent from FAST, `fast_owned`/`inherited_fast` absent from SMC, mixed partitioning, `account_state` passthrough, fallback without registry.
+- **`tests/core/test_ownership_isolation.py`** (new, 6 tests) — registry isolation: manual ticket adopted as `inherited_fast`; SMC ticket not re-adopted; `reassign(smc→fast)` blocked; order adoption; no-adopt flag.
+- **`tests/fast_desk/test_fast_custody_isolation.py`** (new, 3 tests) — custody allowlist: only payload positions touched; contract defence warning on unexpected row; `inherited_fast` position receives custody.
+- **`tests/fast_desk/test_fast_trader_service_flow.py`** — `test_custody_ignores_non_fast_positions` updated to use desk-scoped payload (reflects new architecture); SMC rows remain to verify contract defence warning path.
+- **Regression**: 44 tests passing across 6 test files.
+
+
+
+- **`apps/webui/src/routes/Correlation.tsx`** — correlation matrix table rebuilt per fetched snapshot so timeframe changes and periodic refreshes replace stale cell values instead of reusing previously rendered coefficients.
+- **Display contract clarified in UI** — coefficients now render as signed percentages (`-xx.x%` to `+xx.x%`) while preserving raw `[-1, 1]` values for backend consumers and heatmap intensity.
+- **Live universe updates** — newly added or removed symbols now appear on the next correlation fetch without requiring a manual browser refresh.
+- **`apps/webui/src/api/client.ts` + `apps/webui/vite.config.ts`** — no-cache fetch/proxy behavior enforced for correlation requests to avoid stale browser/proxy responses masking fresh snapshots.
+- **`apps/control_plane.py` + `core/correlation/models.py` + `core/correlation/service.py`** — correlation matrix payload now returns the symbol universe captured in the same atomic snapshot as `pairs`, avoiding header/table mismatches when the subscribed universe changes between refreshes.
+- **`tests/core/test_correlation_service.py`** — snapshot tests extended to cover atomic `symbols` membership alongside pair refresh behavior.
+
 ### Added — Correlation engine, desk wiring & WebUI heatmap (2026-04-05)
 
 Full cross-symbol Pearson correlation engine integrated end-to-end: core service, desk policies, HTTP endpoints, and WebUI visualization.
